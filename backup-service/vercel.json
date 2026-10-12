@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "functions": { "api/handler.js": { "maxDuration": 120 } },
+  "rewrites": [
+    { "source": "/auth/start", "destination": "/api/handler?route=auth-start" },
+    { "source": "/auth/callback", "destination": "/api/handler?route=auth-callback" },
+    { "source": "/api/session", "destination": "/api/handler?route=session" },
+    { "source": "/api/backup", "destination": "/api/handler?route=backup" },
+    { "source": "/api/snapshots", "destination": "/api/handler?route=snapshots" },
+    { "source": "/api/logout", "destination": "/api/handler?route=logout" },
+    { "source": "/health", "destination": "/api/handler?route=health" }
+  ]
+}

@@ -9,6 +9,8 @@ const ASSETS = [
   "./data.js",
   "./core.js",
   "./audio.js",
+  "./backup.js",
+  "./backup-config.js",
   "./icon.svg",
   "./manifest.webmanifest",
 ];

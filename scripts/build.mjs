@@ -18,6 +18,8 @@ const assets = [
   "app.js",
   "core.js",
   "audio.js",
+  "backup.js",
+  "backup-config.js",
   "data.js",
   "icon.svg",
   "manifest.webmanifest",

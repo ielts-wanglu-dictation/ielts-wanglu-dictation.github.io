@@ -2,14 +2,20 @@ import { chapters, sections, allWords, wordById } from "./data.js";
 import {
   gradeAnswer,
   localDateKey,
+  studyDateKey,
   updateReview,
   computeStats,
   createInitialState,
   parseBackup,
 } from "./core.js";
 import { SpeechPlayer } from "./audio.js";
+import { BackupClient } from "./backup.js";
+import { BACKUP_SERVICE_URL } from "./backup-config.js";
 
 const KEY = "wanglu-personal-v1";
+let backupClient = null;
+let backupStatus = { configured: Boolean(BACKUP_SERVICE_URL), connected: false, status: "disconnected", message: "本地保存 · 尚未连接 GitHub" };
+let visibleStudyDay = studyDateKey();
 const $ = (s) => document.querySelector(s);
 const esc = (s) =>
   String(s ?? "").replace(
@@ -53,6 +59,7 @@ const modeLabel = (m) =>
   "听写";
 const dateText = (d) =>
   new Date(d).toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai",
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -98,10 +105,11 @@ const speech = new SpeechPlayer((message, detail) => {
     });
   } else if (detail?.state === "error") toast(message);
 });
-function persist() {
+function persist({ skipBackup = false } = {}) {
   if (storageBlocked) return false;
   try {
     localStorage.setItem(KEY, JSON.stringify(state));
+    if (!skipBackup) backupClient?.notifyChanged();
     return true;
   } catch (e) {
     toast("浏览器未能保存数据，请立即导出备份。可能是存储已满或隐私模式限制。");
@@ -189,7 +197,7 @@ function shell(content) {
     page === "section" || page === "practice" || page === "result"
       ? "library"
       : page;
-  return `<aside class="sidebar"><a class="brand" href="#home" data-nav="home"><img src="./icon.svg" alt=""><div><strong>听见进步</strong><small>MY DICTATION SPACE</small></div></a><div class="nav-label">我的学习空间</div><nav class="nav" aria-label="主要导航">${navs.map(([id, ic, label]) => `<button data-nav="${id}" class="${active === id ? "active" : ""}" ${active === id ? 'aria-current="page"' : ""}>${icon(ic)}<span>${label}</span>${id === "review" && dueCount() ? `<span class="nav-badge">${dueCount()}</span>` : ""}</button>`).join("")}</nav><div class="sidebar-bottom"><div class="side-note">${icon("sound")}<b>每天一点，听见改变。</b>把听得懂的，变成写得对的。</div><div class="side-foot"><span class="dot"></span> 个人学习 · 本地保存</div></div></aside><div class="main-shell"><header class="topbar"><div class="mobile-logo"><img src="./icon.svg" alt="">听见进步</div><div class="breadcrumbs">我的学习空间 <span style="margin:0 10px">/</span> <strong>${navs.find((n) => n[0] === active)?.[2]}</strong></div><div class="top-actions"><span class="local-badge"><span class="dot"></span> ${navigator.onLine ? "学习数据保存在此设备" : "离线模式"}</span>${button(icon("download") + " 备份数据", "export", "small")}<div class="avatar" title="我的听写空间">ME</div></div></header><main id="main" class="main">${storageMessage ? `<div class="notice warning">${esc(storageMessage)}</div>` : ""}${content}<footer class="footer">每一次认真听写，都算数。<br>语料来源：王陆语料库 · 仅供个人学习 &nbsp; / &nbsp; <a href="https://github.com/PipiTang233/wanglu-dictation-app" target="_blank" rel="noopener">原项目</a> · <a href="https://github.com/zyxlele/wanglu-dictation" target="_blank" rel="noopener">初始项目</a> · <a href="https://github.com/ielts-wanglu-dictation/ielts-wanglu-dictation.github.io" target="_blank" rel="noopener">本站源码</a></footer></main></div>`;
+  return `<aside class="sidebar"><a class="brand" href="#home" data-nav="home"><img src="./icon.svg" alt=""><div><strong>听见进步</strong><small>MY DICTATION SPACE</small></div></a><div class="nav-label">我的学习空间</div><nav class="nav" aria-label="主要导航">${navs.map(([id, ic, label]) => `<button data-nav="${id}" class="${active === id ? "active" : ""}" ${active === id ? 'aria-current="page"' : ""}>${icon(ic)}<span>${label}</span>${id === "review" && dueCount() ? `<span class="nav-badge">${dueCount()}</span>` : ""}</button>`).join("")}</nav><div class="sidebar-bottom"><div class="side-note">${icon("sound")}<b>每天一点，听见改变。</b>把听得懂的，变成写得对的。</div><div class="side-foot"><span class="dot"></span> 个人学习 · 本地保存</div></div></aside><div class="main-shell"><header class="topbar"><div class="mobile-logo"><img src="./icon.svg" alt="">听见进步</div><div class="breadcrumbs">我的学习空间 <span style="margin:0 10px">/</span> <strong>${navs.find((n) => n[0] === active)?.[2]}</strong></div><div class="top-actions"><button class="backup-header" data-action="backup-settings" title="查看 GitHub 备份状态"><span class="dot"></span><span data-backup-status>${esc(backupStatus.message)}</span></button>${button(icon("download") + " 备份数据", "export", "small")}<div class="avatar" title="我的听写空间">ME</div></div></header><main id="main" class="main">${storageMessage ? `<div class="notice warning">${esc(storageMessage)}</div>` : ""}${content}<footer class="footer">每一次认真听写，都算数。<br>语料来源：王陆语料库 · 仅供个人学习 &nbsp; / &nbsp; <a href="https://github.com/PipiTang233/wanglu-dictation-app" target="_blank" rel="noopener">原项目</a> · <a href="https://github.com/zyxlele/wanglu-dictation" target="_blank" rel="noopener">初始项目</a> · <a href="https://github.com/ielts-wanglu-dictation/ielts-wanglu-dictation.github.io" target="_blank" rel="noopener">本站源码</a></footer></main></div>`;
 }
 function heading(kicker, title, subtitle, extra = "") {
   return `<div class="page-heading"><div><div class="eyebrow">${kicker}</div><h1>${title}</h1><p>${subtitle}</p></div>${extra}</div>`;
@@ -234,7 +242,7 @@ function home() {
       "A LITTLE PRACTICE, EVERY DAY",
       "今天，也听见一点进步。",
       "从一个单词开始，让每一次练习都有迹可循。",
-      `<span class="date-pill">${new Date().toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" })}</span>`,
+      `<span class="date-pill">${studyDateKey()} 学习日 · 北京时间 06:00 换日</span>`,
     ) +
     `${state.draft ? `<div class="resume-strip"><span>${icon("save")} 上次练习已保存：${esc(state.draft.title)} · 已填写 ${state.draft.answers.filter(Boolean).length} / ${state.draft.wordIds.length}</span>${button("继续听写 " + icon("arrow"), "resume", "small")}</div>` : ""}<div class="hero-grid"><section class="hero"><div class="hero-copy"><span class="tag">YOUR DAILY LISTENING RITUAL</span><h2>让熟悉的单词，<br>成为听力里的确定感。</h2><p>完整王陆语料库，自选节奏，专注听写。<br>今天的进步，就从下一次播放开始。</p>${button(icon("play") + " 开始今日练习", "daily", "primary")}${button("浏览语料", "library-link", "text")}</div><div class="wave-art" aria-hidden="true">${"<i></i>".repeat(9)}</div></section><section class="panel goal-panel"><div class="panel-top"><h3>今日学习目标</h3>${button("调整目标", "goal", "text small")}</div><div class="goal-body"><div class="goal-ring" style="--progress:${progress}%"><div><strong>${s.todayCount}</strong><span>/ ${goal} 个词</span></div></div><div class="goal-info"><b>${progress >= 100 ? "今日目标已完成" : "给专注留一点时间"}</b><p>${progress >= 100 ? "做得不错，明天继续。" : `再练 ${Math.max(0, goal - s.todayCount)} 个，完成今日目标`}</p><span class="mini">${icon("check")} 每一步都在积累</span></div></div></section></div>` +
     metrics([
@@ -596,14 +604,50 @@ function audioFields() {
       "",
     )}</select></div></div><div class="field row"><input id="set-autoPlay" type="checkbox" data-setting="autoPlay" ${s.autoPlay ? "checked" : ""}><label for="set-autoPlay">输入框获得焦点时自动朗读</label></div><div class="flex" style="margin-top:15px">${button(icon("sound") + " 测试语音", "test-voice", "soft")}<small class="muted">播放 accommodation</small></div><div class="audio-status audio-settings-status" role="status" aria-live="polite">点击测试可检查此设备的发音。</div>`;
 }
+function backupPanel() {
+  const b = backupStatus;
+  return `<div class="flex space"><h2>GitHub 私有备份</h2><span class="chip ${b.connected ? 'green' : ''}">${b.connected ? '已连接' : '未连接'}</span></div>
+  <p class="backup-status-line" data-backup-status role="status">${esc(b.message)}</p>
+  <p class="muted" style="font-size:12px">练习时自动上传；每天北京时间 04:00 留存快照。学习日从 06:00 开始，午夜不中断。首次打开会检查仓库，新进度不会被旧备份覆盖。</p>
+  ${b.lastUploadedAt ? `<p class="muted" style="font-size:11px">最近上传：${dateText(b.lastUploadedAt)}（北京时间）</p>` : ''}
+  <div class="flex">${b.connected ? button(icon('upload')+' 立即备份','backup-now','primary') + button('检查仓库进度','backup-check') + button('退出登录','backup-logout','text small') : button('使用 GitHub 登录','backup-login','primary', b.configured ? '' : 'disabled')}
+  ${b.conflict ? button('处理进度冲突','backup-conflict','danger') : ''}</div>
+  ${!b.configured ? '<div class="notice">GitHub 登录服务尚未完成配置。现有记录继续保存在本机，文件备份可正常使用。</div>' : ''}
+  <p class="muted" style="font-size:11px;margin-top:14px">备份保存在独立私有仓库，仅授权的个人账号可访问。离线时先保存本机，恢复网络后补传。04:00 定时归档可能因 GitHub 排队延迟。</p>`;
+}
+function updateBackupStatus(next) {
+  backupStatus = next;
+  document.querySelectorAll('[data-backup-status]').forEach(el => { el.textContent = next.message; });
+  const panel = $('#github-backup-panel');
+  if (panel) panel.innerHTML = backupPanel();
+}
+function backupConflictDialog() {
+  const conflict = backupClient?.pendingConflict;
+  if (!conflict) { toast('当前没有需要处理的进度冲突。'); return; }
+  modal('发现两份不同的进度', '<p>本机与仓库都有各自的新修改，已暂停自动上传。两份数据都保留着。</p><p>选择前会下载本机与仓库两份备份，避免丢失。不会自动合并或静默覆盖。</p>', [
+    {label:'暂不处理',action:closeModal},
+    {label:'保留本机并上传',action:()=>resolveBackupConflict('local')},
+    {label:'恢复仓库进度',primary:true,action:()=>resolveBackupConflict('remote')},
+  ]);
+}
+async function resolveBackupConflict(choice) {
+  const c=backupClient?.pendingConflict;
+  if(!c)return;
+  download(JSON.stringify({app:'wanglu-personal',state},null,2),`wanglu-before-conflict-${localDateKey()}.json`);
+  if(c.remote) download(JSON.stringify(c.remote,null,2),`wanglu-conflict-github-${localDateKey()}.json`);
+  closeModal();
+  const result=await backupClient.resolveConflict(choice);
+  if(result.status==='conflict')toast('仓库又有新修改，请重新比较两份进度。');
+}
+
 function settingsPage() {
   return (
     heading(
       "MAKE IT YOURS",
       "按自己的节奏，练习。",
-      "偏好自动保存。学习数据保留在当前浏览器，请定期备份。",
+      "先保存到本机，连接 GitHub 后自动备份到你的私有仓库。",
     ) +
-    `<div class="settings-grid"><section class="panel"><h2>听写与发音</h2>${audioFields()}<p class="muted" style="font-size:11px;margin-top:18px">本机语音由浏览器和系统提供；若未安装英语语音，将尝试在线备用源。短语优先合成语音。这里的发音不是原书配套录音。</p></section><div class="stack"><section class="panel"><h2>我的学习偏好</h2><div class="form-row"><div class="field"><label for="set-dailyGoal">每日目标（词）</label><input id="set-dailyGoal" data-setting="dailyGoal" type="number" min="1" max="1000" value="${state.settings.dailyGoal}"></div><div class="field"><label for="set-theme">界面主题</label><select id="set-theme" data-setting="theme"><option value="light" ${state.settings.theme === "light" ? "selected" : ""}>浅色 · 安静书桌</option><option value="dark" ${state.settings.theme === "dark" ? "selected" : ""}>深色 · 夜间练习</option><option value="system" ${state.settings.theme === "system" ? "selected" : ""}>跟随系统</option></select></div></div></section><section class="panel"><h2>备份与迁移</h2><p class="muted" style="font-size:12px;margin-top:9px">备份包含练习历史、错词、设置和未完成草稿。不同设备之间可通过备份文件手动迁移，不会自动云同步。</p><div class="flex">${button(icon("download") + " 导出全部数据", "export", "primary")}${button(icon("upload") + " 导入数据", "import")}${button("导出错词 CSV", "export-words", "small")}</div><p class="muted" style="font-size:11px;margin-top:14px">兼容原项目 wl2 / wl3 的 {hist, wb} 备份；导入前自动下载当前数据备份。文件内容只在本地处理。</p></section><section class="panel"><h2>离线使用</h2><p class="muted" style="font-size:12px;margin-top:9px">首次联网打开后会缓存页面和全部语料。支持的浏览器可将本站添加到主屏幕。本机英语语音可离线使用；词典及在线备用发音仍需联网。</p>${button("刷新离线缓存", "update-cache", "small")}</section></div></div><section class="panel danger-zone"><h3>清空本机学习数据</h3><p class="muted" style="font-size:12px">仅清除此页面在当前浏览器中的数据。请先导出备份。</p>${button("清空数据…", "clear", "danger small")}</section>`
+    `<div class="settings-grid"><section class="panel"><h2>听写与发音</h2>${audioFields()}<p class="muted" style="font-size:11px;margin-top:18px">本机语音由浏览器和系统提供；若未安装英语语音，将尝试在线备用源。短语优先合成语音。这里的发音不是原书配套录音。</p></section><div class="stack"><section id="github-backup-panel" class="panel">${backupPanel()}</section><section class="panel"><h2>我的学习偏好</h2><div class="form-row"><div class="field"><label for="set-dailyGoal">每日目标（词）</label><input id="set-dailyGoal" data-setting="dailyGoal" type="number" min="1" max="1000" value="${state.settings.dailyGoal}"></div><div class="field"><label for="set-theme">界面主题</label><select id="set-theme" data-setting="theme"><option value="light" ${state.settings.theme === "light" ? "selected" : ""}>浅色 · 安静书桌</option><option value="dark" ${state.settings.theme === "dark" ? "selected" : ""}>深色 · 夜间练习</option><option value="system" ${state.settings.theme === "system" ? "selected" : ""}>跟随系统</option></select></div></div></section><section class="panel"><h2>备份与迁移</h2><p class="muted" style="font-size:12px;margin-top:9px">文件备份包含练习历史、错词、设置和未完成草稿。即使未连接 GitHub，也可以随时导出或手动恢复。</p><div class="flex">${button(icon("download") + " 导出全部数据", "export", "primary")}${button(icon("upload") + " 导入数据", "import")}${button("导出错词 CSV", "export-words", "small")}</div><p class="muted" style="font-size:11px;margin-top:14px">兼容原项目 wl2 / wl3 的 {hist, wb} 备份；导入前自动下载当前数据备份。文件先在本地校验；连接 GitHub 后，导入的进度也会自动备份。</p></section><section class="panel"><h2>离线使用</h2><p class="muted" style="font-size:12px;margin-top:9px">首次联网打开后会缓存页面和全部语料。支持的浏览器可将本站添加到主屏幕。本机英语语音可离线使用；词典及在线备用发音仍需联网。</p>${button("刷新离线缓存", "update-cache", "small")}</section></div></div><section class="panel danger-zone"><h3>清空本机学习数据</h3><p class="muted" style="font-size:12px">仅清除此浏览器的数据，并断开 GitHub 备份连接；仓库中的备份保留。请先导出文件备份。</p>${button("清空数据…", "clear", "danger small")}</section>`
   );
 }
 function render() {
@@ -1010,6 +1054,15 @@ const actions = {
         },
       ],
     ),
+  'backup-settings': () => navigate('settings'),
+  'backup-login': () => {
+    if(storageBlocked){toast('请先导出无法读取的本地数据，再连接备份。');return;}
+    return backupClient.login();
+  },
+  'backup-now': () => {if(session)saveDraft();return backupClient.flush();},
+  'backup-check': () => backupClient.checkRemote(),
+  'backup-logout': () => {backupClient.logout();toast('已退出 GitHub 登录，本机练习记录保留。');},
+  'backup-conflict': backupConflictDialog,
   export: exportData,
   "export-words": exportWords,
   import: importDialog,
@@ -1028,6 +1081,7 @@ const actions = {
               $("#dialog-error").textContent = "请输入「清空」。";
               return;
             }
+            backupClient?.logout();
             const previous = state;
             state = createInitialState();
             storageBlocked = false;
@@ -1220,6 +1274,31 @@ window.speechSynthesis?.addEventListener("voiceschanged", () => {
         .join("");
   }
 });
+backupClient = new BackupClient({
+  serviceUrl: BACKUP_SERVICE_URL,
+  getState: () => structuredClone(state),
+  applyState: next => {
+    if (storageBlocked) throw new Error('本地数据不可读，请先导出原始数据。');
+    const validated = parseBackup(next, allWords);
+    // Persist before replacing in-memory progress so a quota error never loses it.
+    localStorage.setItem(KEY, JSON.stringify(validated));
+    stop(); session = null; startedSegment = 0;
+    state = validated; page = 'home'; render();
+    toast('已从 GitHub 恢复进度。');
+  },
+  onStatus: updateBackupStatus,
+});
 render();
+if (!storageBlocked) backupClient.init();
+function checkStudyDay() {
+  const next=studyDateKey();
+  if(next!==visibleStudyDay){
+    visibleStudyDay=next;
+    if(page==='home'||page==='history')render();
+    if(!storageBlocked)backupClient.checkRemote();
+  }
+}
+setInterval(checkStudyDay,60000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkStudyDay();});
 if ("serviceWorker" in navigator)
   navigator.serviceWorker.register("./sw.js").catch(() => {});

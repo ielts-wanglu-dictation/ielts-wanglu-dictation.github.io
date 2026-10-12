@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { allWords, chapters, sections, getAllWords } from '../data.js';
 import {
   answerVariants, computeStats, createInitialState, gradeAnswer, localDateKey,
-  migrateLegacy, normalizeAnswer, parseBackup, updateReview, validateBackup,
+  migrateLegacy, normalizeAnswer, parseBackup, studyDateKey, updateReview, validateBackup,
 } from '../core.js';
 
 const now = new Date(2026, 9, 11, 12, 0, 0);
@@ -66,6 +67,69 @@ test('date keys describe local calendar days and reject invalid input', () => {
   assert.throws(() => localDateKey('invalid date'));
 });
 
+test('study dates change at Beijing 06:00, including milliseconds and calendar rollover', () => {
+  assert.equal(studyDateKey('2026-10-12T00:00:00+08:00'), '2026-10-11');
+  assert.equal(studyDateKey('2026-10-12T05:59:59+08:00'), '2026-10-11');
+  assert.equal(studyDateKey('2026-10-12T05:59:59.999+08:00'), '2026-10-11');
+  assert.equal(studyDateKey('2026-10-12T06:00:00+08:00'), '2026-10-12');
+  assert.equal(studyDateKey('2027-01-01T05:59:59+08:00'), '2026-12-31');
+  assert.equal(studyDateKey('2028-03-01T05:59:59+08:00'), '2028-02-29');
+  assert.equal(studyDateKey(new Date('2026-10-11T22:00:00Z')), '2026-10-12');
+  assert.equal(studyDateKey(Date.parse('2026-10-11T22:00:00Z')), '2026-10-12');
+  assert.throws(() => studyDateKey('invalid date'));
+});
+
+test('Beijing study-day totals persist past midnight and reset exactly at 06:00', () => {
+  const history = [
+    session({ date: '2026-10-11T23:30:00+08:00', total: 20, correct: 15, results: [] }),
+    session({ id: 'early', date: '2026-10-12T05:59:59+08:00', total: 10, correct: 5, results: [] }),
+  ];
+  const before = computeStats(history, '2026-10-12T05:59:59+08:00');
+  assert.equal(before.todayCount, 30);
+  assert.equal(before.streak, 1);
+  const after = computeStats(history, '2026-10-12T06:00:00+08:00');
+  assert.equal(after.todayCount, 0);
+  assert.equal(after.streak, 1, 'the preceding study day keeps the streak alive');
+  assert.equal(after.totalWords, 30);
+  assert.equal(after.accuracy, 67);
+  history.push(session({ id: 'new-day', date: '2026-10-12T06:00:00+08:00', total: 5, correct: 5, results: [] }));
+  assert.equal(computeStats(history, '2026-10-12T06:00:00+08:00').todayCount, 5);
+  assert.equal(computeStats(history, '2026-10-12T06:00:00+08:00').streak, 2);
+});
+
+test('study-day streak spans Beijing boundaries and expires after a missed study day', () => {
+  const history = [
+    session({ date: '2026-10-10T06:00:00+08:00' }),
+    session({ id: 'yesterday', date: '2026-10-12T05:59:59+08:00' }),
+  ];
+  assert.equal(computeStats(history, '2026-10-12T06:00:00+08:00').streak, 2);
+  assert.equal(computeStats(history, '2026-10-13T05:59:59+08:00').streak, 2);
+  assert.equal(computeStats(history, '2026-10-13T06:00:00+08:00').streak, 0);
+});
+
+test('study dates and streaks are independent of device timezone and local daylight saving', () => {
+  const moduleURL = new URL('../core.js', import.meta.url).href;
+  const source = `import {studyDateKey,computeStats} from ${JSON.stringify(moduleURL)};
+    const dates = [
+      '2026-03-08T01:59:59-08:00', '2026-03-08T03:00:00-07:00',
+      '2026-11-01T01:30:00-07:00', '2026-11-01T01:30:00-08:00',
+      '2026-10-11T21:59:59Z', '2026-10-11T22:00:00Z'
+    ];
+    const history = ['2026-03-06T22:01:00Z','2026-03-07T22:01:00Z']
+      .map(date => ({date,total:10,correct:8}));
+    process.stdout.write(JSON.stringify({dates:dates.map(studyDateKey),
+      stats:computeStats(history,'2026-03-08T22:00:00Z')}));`;
+  const expected = { dates: ['2026-03-08', '2026-03-08', '2026-11-01', '2026-11-01', '2026-10-11', '2026-10-12'],
+    stats: { todayCount: 0, totalWords: 20, totalSessions: 2, accuracy: 80, streak: 2 } };
+  for (const timezone of ['UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'Pacific/Honolulu', 'Pacific/Auckland']) {
+    const run = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+      env: { ...process.env, TZ: timezone }, encoding: 'utf8', timeout: 10000,
+    });
+    assert.equal(run.status, 0, `${timezone}: ${run.stderr}`);
+    assert.deepEqual(JSON.parse(run.stdout), expected, timezone);
+  }
+});
+
 test('review scheduling advances correctly and wrong answers reset the interval', () => {
   const firstWrong = updateReview({}, false, now);
   assert.equal(firstWrong.wrongCount, 1);
@@ -102,10 +166,10 @@ test('stats weight accuracy by word count and include all modes in daily totals'
 });
 
 test('streak survives an unfinished today, deduplicates days, and breaks on a missed day', () => {
-  const day = number => new Date(2026, 9, number, 12).toISOString();
+  const day = number => `2026-10-${String(number).padStart(2, '0')}T12:00:00+08:00`;
   const history = [session({ date: day(9) }), session({ date: day(10) }), session({ date: day(10) })];
-  assert.equal(computeStats(history, now).streak, 2);
-  assert.equal(computeStats(history, new Date(2026, 9, 12, 12)).streak, 0);
+  assert.equal(computeStats(history, day(11)).streak, 2);
+  assert.equal(computeStats(history, day(12)).streak, 0);
 });
 
 test('new backups round-trip settings, history, review scheduling and in-progress answers', () => {

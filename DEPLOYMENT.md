@@ -4,7 +4,15 @@
 
 目标网址：[https://ielts-wanglu-dictation.github.io/](https://ielts-wanglu-dictation.github.io/)。
 
-这是纯静态网站，运行时不依赖 Node.js、数据库或服务器。Node.js 24 用于自动测试与打包；无需安装 npm 依赖。练习历史、错词及草稿保存在使用者浏览器，发到 GitHub 的内容不包含这些学习记录。
+练习网站部署于 GitHub Pages。Node.js 24 用于自动测试与打包；无需安装 npm 依赖。练习历史、错词及草稿首先保存在使用者浏览器，公共源码仓库不包含学习记录。可选的 GitHub 登录备份服务独立部署于 Vercel，备份只写入专用私有仓库，没有学习数据库。
+
+## 私有备份部署状态
+
+专用仓库为 [wanglu-dictation-backups](https://github.com/ielts-wanglu-dictation/wanglu-dictation-backups)，已设为私有并配置 `backup.yml`：每天 UTC 20:00，即北京时间次日 04:00，归档已经上传的 `latest.json`；没有记录时跳过，不生成空备份。也可以手动运行验证。
+
+GitHub 登录还需部署 [backup-service](backup-service/README.md)，创建并安装专用 GitHub App，配置服务端环境变量，再将实际生产地址填入 `backup-config.js` 的 `BACKUP_SERVICE_URL`。当前地址留空时，页面会明确显示服务未配置，并禁用登录；不能把已创建归档工作流视为已备份浏览器记录。只有真实登录、上传成功、私有仓库出现 `latest.json` 后，定时任务才有可归档的数据。
+
+GitHub Action 无法读取浏览器存储。上传发生在浏览器运行且联网时；04:00 是归档触发时间，不保证精确执行。06:00 开始新学习日时，客户端读取最新上传版本并核对共同版本和内容摘要，不会按日期直接覆盖本机较新的记录。断网、上传失败或版本冲突都会保留本机数据。登出会撤销 GitHub 用户令牌（网络允许时）并立即清除本机登录会话，学习记录保留；清空本机学习数据会先退出登录，避免把空记录同步到仓库。
 
 ## 首次发布
 
@@ -23,6 +31,7 @@
 
 ```sh
 npm test
+npm run test:service
 npm run check
 node scripts/build.mjs
 python -m http.server 4173 --bind 127.0.0.1 --directory dist
@@ -30,7 +39,7 @@ python -m http.server 4173 --bind 127.0.0.1 --directory dist
 
 然后访问 [本地预览](http://127.0.0.1:4173/)。请通过 HTTP 预览，直接双击 `index.html` 会受到 ES 模块及 Service Worker 的浏览器限制。
 
-构建脚本仅复制 `index.html`、`styles.css`、`app.js`、`core.js`、`audio.js`、`data.js`、`icon.svg`、`manifest.webmanifest`、`sw.js`，并创建 `.nojekyll`。所有源文件都存在且可读取后才重建 `dist`；测试、Git 目录和本地辅助文件不会进入发布产物。
+构建脚本仅复制 `index.html`、`styles.css`、`app.js`、`core.js`、`audio.js`、`backup.js`、`backup-config.js`、`data.js`、`icon.svg`、`manifest.webmanifest`、`sw.js`，并创建 `.nojekyll`。所有源文件都存在且可读取后才重建 `dist`；授权服务源码、测试、Git 目录、本地辅助文件和环境变量不会进入 Pages 发布产物。`backup-config.js` 只能包含公开服务地址，不能放入密钥。
 
 ## 更新与离线缓存
 

@@ -76,6 +76,13 @@ export function localDateKey(value = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
+/** A study day runs from 06:00 to the next 05:59:59 in Beijing (UTC+08:00). */
+export function studyDateKey(value = new Date()) {
+  // UTC + 8 hours for Beijing, minus 6 hours for the study-day boundary.
+  // Fixed arithmetic keeps device timezones and daylight-saving changes irrelevant.
+  return new Date(validDate(value).getTime() + 2 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 export function updateReview(previous = {}, isCorrect, now = new Date()) {
   const date = validDate(now);
   const old = previous || {};
@@ -90,7 +97,7 @@ export function updateReview(previous = {}, isCorrect, now = new Date()) {
 }
 
 export function computeStats(history = [], now = new Date()) {
-  const today = localDateKey(now);
+  const today = studyDateKey(now);
   const days = new Set();
   let todayCount = 0, totalWords = 0, totalCorrect = 0;
   for (const session of history) {
@@ -99,19 +106,20 @@ export function computeStats(history = [], now = new Date()) {
     totalWords += total;
     totalCorrect += correct;
     if (total > 0) {
-      const day = localDateKey(session.date);
+      const day = studyDateKey(session.date);
       days.add(day);
       if (day === today) todayCount += total;
     }
   }
-  const cursor = validDate(now);
-  cursor.setHours(12, 0, 0, 0);
-  // A streak remains alive until the end of today if yesterday was completed.
-  if (!days.has(localDateKey(cursor))) cursor.setDate(cursor.getDate() - 1);
+  // The cursor represents a calendar label, not a local timestamp or a review due date.
+  const cursor = new Date(`${today}T12:00:00.000Z`);
+  const cursorKey = () => cursor.toISOString().slice(0, 10);
+  // A streak remains alive until the next Beijing 06:00 if yesterday was completed.
+  if (!days.has(cursorKey())) cursor.setUTCDate(cursor.getUTCDate() - 1);
   let streak = 0;
-  while (days.has(localDateKey(cursor))) {
+  while (days.has(cursorKey())) {
     streak++;
-    cursor.setDate(cursor.getDate() - 1);
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
   }
   return { todayCount, totalWords, totalSessions: history.length,
     accuracy: totalWords ? Math.round(totalCorrect / totalWords * 100) : 0, streak };
