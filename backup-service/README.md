@@ -10,8 +10,8 @@
 2. Homepage URL 填 `https://ielts-wanglu-dictation.github.io`。
 3. 确定 Vercel 的稳定生产域名后，将 **Callback URL** 精确设为 `https://你的生产域名/auth/callback`。不附带查询参数或其他跳转地址。
 4. Repository permissions 只授予 **Contents: Read and write**；Metadata 的只读权限由 GitHub 自动包含。不需要其他仓库权限、账户权限或 webhook。可关闭 Webhook 的 Active 选项。
-5. 保持 user-to-server token expiration 开启。不要开启设备登录流程。不要使用传统 OAuth App 的 `repo` scope。
-6. 将 GitHub App 安装到组织，仅选择 `wanglu-dictation-backups` 一个仓库。
+5. 保持 user-to-server token expiration 开启。**不要勾选 Request user authorization (OAuth) during installation**，也不要开启设备登录流程。不要使用传统 OAuth App 的 `repo` scope。
+6. 将 GitHub App 安装到组织，仅选择 `wanglu-dictation-backups` 一个仓库。安装与服务配置完成后，从听写站点的“连接 GitHub”按钮开始授权，才能先建立登录所需的 state、PKCE 和弹窗 nonce；安装时直接发起 OAuth 不具备这些验证上下文，会被服务拒绝。
 7. 在应用设置中取得 **Client ID** 并生成 **Client secret**。服务使用 OAuth 用户授权，不需要 GitHub App 私钥或个人 PAT。Client secret 只保存到 Vercel 服务端环境变量。
 
 GitHub App 的权限由应用配置、安装仓库和用户自身权限共同限制；本服务的 OAuth 请求不传任何权限 scope，使用 PKCE S256 和随机 state 验证流程。[官方 GitHub App 用户授权文档](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app)
