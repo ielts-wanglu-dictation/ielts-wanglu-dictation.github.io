@@ -2,6 +2,8 @@
 
 为 [听见进步](https://ielts-wanglu-dictation.github.io) 提供 GitHub App 登录与私有仓库备份。它是独立部署的 Node.js 22 ESM API，没有数据库、npm 依赖或本地持久文件。
 
+本实例的稳定生产地址为 `https://wanglu-backup-service.vercel.app`，GitHub App Callback URL 为 `https://wanglu-backup-service.vercel.app/auth/callback`。服务端配置位于 [Vercel 项目环境变量](https://vercel.com/liuys117810-6281s-projects/wanglu-backup-service/settings/environment-variables)，健康检查为 [`/health`](https://wanglu-backup-service.vercel.app/health)。部署状态 READY 表示代码构建完成；只有配置完整、真实 GitHub 登录与备份验证通过后，才能认为自动备份已启用。
+
 只允许 GitHub 用户 **scpsyl，数字 ID `89184687`**。只读写私有仓库 `ielts-wanglu-dictation/wanglu-dictation-backups` 的 `main` 分支：当前备份只写 `latest.json`，历史快照只读 `snapshots/index.json` 和 `snapshots/YYYY-MM-DD.json`。每次备份请求都会检查仓库仍为私有。
 
 ## GitHub App 配置
