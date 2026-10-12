@@ -1,0 +1,1225 @@
+import { chapters, sections, allWords, wordById } from "./data.js";
+import {
+  gradeAnswer,
+  localDateKey,
+  updateReview,
+  computeStats,
+  createInitialState,
+  parseBackup,
+} from "./core.js";
+import { SpeechPlayer } from "./audio.js";
+
+const KEY = "wanglu-personal-v1";
+const $ = (s) => document.querySelector(s);
+const esc = (s) =>
+  String(s ?? "").replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
+  );
+const icons = {
+  home: "M3 10 12 3l9 7M5 9v12h5v-7h4v7h5V9",
+  book: "M4 3h7a3 3 0 0 1 3 3v15a4 4 0 0 0-4-2H4V3zm10 3a3 3 0 0 1 3-3h4v16h-4a3 3 0 0 0-3 2",
+  review: "M8 3H5v18h14V3h-3M8 2h8v4H8zM8 11h8M8 15h5",
+  chart: "M4 3v18h17M8 16l4-5 4 2 5-7",
+  settings:
+    "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1z",
+  play: "m8 4 12 8-12 8V4z",
+  sound: "M3 9h4l5-4v14l-5-4H3V9zm13-1a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14",
+  arrow: "M4 12h16m-6-6 6 6-6 6",
+  target: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18m0 5a4 4 0 1 0 0 8 4 4 0 0 0 0-8",
+  flame: "M12 2c2 6 7 7 7 13a7 7 0 0 1-14 0c0-4 3-6 4-8 0 4 3 5 3-5z",
+  check: "m5 12 4 4L20 5",
+  clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18m0 5v5l4 2",
+  download: "M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5",
+  upload: "M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5",
+  shuffle: "M3 6h3l12 12h3m-4-4 4 4-4 4M3 18h3l4-4m4-4 4-4h3m-4-4 4 4-4 4",
+  pause: "M8 4v16M16 4v16",
+  close: "m6 6 12 12M6 18 18 6",
+  back: "M20 12H4m6-6-6 6 6 6",
+  search: "M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14m5 12 6 6",
+  sun: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1 1m12 12 1 1M5 19l1-1M18 6l1-1",
+  save: "M5 3h12l4 4v14H3V3h2m2 0v6h10V3M7 21v-8h10v8",
+  info: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18m0 7v6m0-9v.1",
+};
+const icon = (n) =>
+  `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${icons[n] || icons.book}"/></svg>`;
+const button = (label, action, cls = "", attrs = "") =>
+  `<button class="button ${cls}" data-action="${action}" ${attrs}>${label}</button>`;
+const modeLabel = (m) =>
+  ({ normal: "顺序听写", shuffle: "乱序测试", review: "错词复习" })[m] ||
+  "听写";
+const dateText = (d) =>
+  new Date(d).toLocaleString("zh-CN", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+let state = createInitialState(),
+  storageBlocked = false,
+  storageMessage = "";
+try {
+  const raw = localStorage.getItem(KEY);
+  if (raw) state = parseBackup(raw, allWords);
+} catch (e) {
+  storageBlocked = true;
+  storageMessage =
+    "本地数据暂时无法读取。请在「设置与备份」导出原始数据后检查，当前不会覆盖已有数据。";
+}
+let page = "home",
+  chapterFilter = "3",
+  reviewFilter = "all",
+  reviewSort = "count",
+  reviewSearch = "",
+  reviewChapter = "",
+  historySection = "",
+  currentSection = null,
+  session = null,
+  lastResult = null,
+  resultFilter = "wrong",
+  alignment = [],
+  blockToken = 0,
+  rowPlayToken = 0,
+  blockPlaying = false,
+  activeIndex = 0,
+  startedSegment = 0,
+  toastTimer;
+const speech = new SpeechPlayer((message, detail) => {
+  const els = document.querySelectorAll(
+    "#audio-status, #dialog[open] .audio-settings-status, #main .audio-settings-status",
+  );
+  if (els.length) {
+    els.forEach((el) => {
+      el.textContent = message;
+      el.dataset.state = detail?.state || "";
+    });
+  } else if (detail?.state === "error") toast(message);
+});
+function persist() {
+  if (storageBlocked) return false;
+  try {
+    localStorage.setItem(KEY, JSON.stringify(state));
+    return true;
+  } catch (e) {
+    toast("浏览器未能保存数据，请立即导出备份。可能是存储已满或隐私模式限制。");
+    return false;
+  }
+}
+function toast(message) {
+  $("#toast").textContent = message;
+  $("#toast").classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("#toast").classList.remove("show"), 5000);
+}
+function stop() {
+  blockToken++;
+  rowPlayToken++;
+  blockPlaying = false;
+  speech.stop();
+  document
+    .querySelectorAll(".dict-row.playing")
+    .forEach((e) => e.classList.remove("playing"));
+  const b = $('[data-action="block"]');
+  if (b) b.innerHTML = icon("play") + " 连播";
+}
+function elapsed() {
+  return (
+    (session?.elapsed || 0) +
+    (startedSegment ? Math.max(0, (Date.now() - startedSegment) / 1000) : 0)
+  );
+}
+function saveDraft() {
+  if (!session) return;
+  state.draft = { ...session, elapsed: Math.round(elapsed()), activeIndex };
+  persist();
+}
+function suspend() {
+  if (session) {
+    saveDraft();
+    session = null;
+    startedSegment = 0;
+  }
+  stop();
+}
+function navigate(next) {
+  suspend();
+  page = next;
+  render();
+  window.scrollTo(0, 0);
+}
+function wordsForDraft(d) {
+  if (!d || !Array.isArray(d.wordIds) || !Array.isArray(d.answers)) return [];
+  return d.wordIds
+    .map((id, i) => wordById.get(id) || d.words?.[i])
+    .filter((w) => w && typeof w.text === "string");
+}
+function reviewWords(filter = reviewFilter) {
+  const now = Date.now();
+  return Object.values(state.reviews)
+    .filter((r) => r.wrongCount > 0)
+    .filter(
+      (r) =>
+        filter === "all" ||
+        (filter === "due"
+          ? new Date(r.due).getTime() <= now
+          : filter === "active"
+            ? r.streak < 3
+            : r.streak >= 3),
+    )
+    .map((r) => ({ ...r, id: r.wordId, ...wordById.get(r.wordId) }));
+}
+function dueCount() {
+  return reviewWords("due").length;
+}
+function sectionHistory(id) {
+  return state.history.filter((h) => h.sectionId === id);
+}
+function shell(content) {
+  const navs = [
+    ["home", "home", "学习概览"],
+    ["library", "book", "语料练习"],
+    ["review", "review", "我的错词"],
+    ["history", "chart", "学习记录"],
+    ["settings", "settings", "设置与备份"],
+  ];
+  const active =
+    page === "section" || page === "practice" || page === "result"
+      ? "library"
+      : page;
+  return `<aside class="sidebar"><a class="brand" href="#home" data-nav="home"><img src="./icon.svg" alt=""><div><strong>听见进步</strong><small>MY DICTATION SPACE</small></div></a><div class="nav-label">我的学习空间</div><nav class="nav" aria-label="主要导航">${navs.map(([id, ic, label]) => `<button data-nav="${id}" class="${active === id ? "active" : ""}" ${active === id ? 'aria-current="page"' : ""}>${icon(ic)}<span>${label}</span>${id === "review" && dueCount() ? `<span class="nav-badge">${dueCount()}</span>` : ""}</button>`).join("")}</nav><div class="sidebar-bottom"><div class="side-note">${icon("sound")}<b>每天一点，听见改变。</b>把听得懂的，变成写得对的。</div><div class="side-foot"><span class="dot"></span> 个人学习 · 本地保存</div></div></aside><div class="main-shell"><header class="topbar"><div class="mobile-logo"><img src="./icon.svg" alt="">听见进步</div><div class="breadcrumbs">我的学习空间 <span style="margin:0 10px">/</span> <strong>${navs.find((n) => n[0] === active)?.[2]}</strong></div><div class="top-actions"><span class="local-badge"><span class="dot"></span> ${navigator.onLine ? "学习数据保存在此设备" : "离线模式"}</span>${button(icon("download") + " 备份数据", "export", "small")}<div class="avatar" title="我的听写空间">ME</div></div></header><main id="main" class="main">${storageMessage ? `<div class="notice warning">${esc(storageMessage)}</div>` : ""}${content}<footer class="footer">每一次认真听写，都算数。<br>语料来源：王陆语料库 · 仅供个人学习 &nbsp; / &nbsp; <a href="https://github.com/PipiTang233/wanglu-dictation-app" target="_blank" rel="noopener">原项目</a> · <a href="https://github.com/zyxlele/wanglu-dictation" target="_blank" rel="noopener">初始项目</a> · <a href="https://github.com/ielts-wanglu-dictation/ielts-wanglu-dictation.github.io" target="_blank" rel="noopener">本站源码</a></footer></main></div>`;
+}
+function heading(kicker, title, subtitle, extra = "") {
+  return `<div class="page-heading"><div><div class="eyebrow">${kicker}</div><h1>${title}</h1><p>${subtitle}</p></div>${extra}</div>`;
+}
+function metrics(items) {
+  return `<div class="metrics">${items.map(([ic, n, unit, label]) => `<div class="metric"><div class="metric-icon">${icon(ic)}</div><div><b>${n}<small>${unit}</small></b><span>${label}</span></div></div>`).join("")}</div>`;
+}
+function chapterTabs() {
+  return `<div class="tabs" aria-label="章节筛选">${chapters.map((c) => `<button class="${chapterFilter === c.id ? "active" : ""}" data-chapter="${esc(c.id)}">${esc(c.title)}</button>`).join("")}</div>`;
+}
+function sectionCards(limit) {
+  const secs = sections.filter((s) => s.chapterId === chapterFilter);
+  return `<div class="chapter-grid">${secs
+    .slice(0, limit || secs.length)
+    .map((s) => {
+      const hs = sectionHistory(s.id),
+        last = hs.at(-1),
+        done = new Set(hs.flatMap((h) => h.results.map((r) => r.wordId))).size;
+      return `<article class="chapter-card"><div class="card-top"><div class="book-icon">${icon("book")}</div><span class="chip ${last ? "green" : ""}">${last ? Math.round((last.correct / last.total) * 100) + "% 正确" : "待开始"}</span></div><h3>第 ${esc(s.id)} 节 · ${s.chapterId === "5" || s.chapterId === "11" ? "短语听写" : "词汇听写"}</h3><p>${s.words.length} 个词条 · ${hs.length ? hs.length + " 次练习" : "开启你的第一遍练习"}</p><div class="progress-track"><span style="width:${Math.min(100, (done / s.words.length) * 100)}%"></span></div><div class="card-bottom"><span>已练 ${Math.min(done, s.words.length)} / ${s.words.length} 词</span>${button("开始练习 " + icon("arrow"), "section", "small text", `data-id="${esc(s.id)}"`)}</div></article>`;
+    })
+    .join("")}</div>`;
+}
+function recentTable(history, compact = false) {
+  if (!history.length)
+    return `<div class="empty">${icon("chart")}<p>还没有练习记录</p>完成一次听写，你的进步就会出现在这里。</div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>练习内容</th><th>正确率</th>${compact ? "" : "<th>答对 / 总数</th>"}<th>时间</th><th><span class="sr-only">详情</span></th></tr></thead><tbody>${[
+    ...history,
+  ]
+    .reverse()
+    .map(
+      (h) =>
+        `<tr><td>${esc(h.title || h.sectionId || "复习")}<span class="sub">${modeLabel(h.mode)}</span></td><td><span class="chip ${h.correct / h.total >= 0.8 ? "green" : "purple"}">${h.total ? Math.round((h.correct / h.total) * 100) : 0}%</span></td>${compact ? "" : `<td>${h.correct} / ${h.total}</td>`}<td class="muted">${dateText(h.date)}</td><td>${button("详情", "history-detail", "small text", `data-id="${esc(h.id)}"`)}</td></tr>`,
+    )
+    .join("")}</tbody></table></div>`;
+}
+function home() {
+  const s = computeStats(state.history),
+    goal = state.settings.dailyGoal || 50,
+    progress = Math.min(100, (s.todayCount / goal) * 100);
+  return (
+    heading(
+      "A LITTLE PRACTICE, EVERY DAY",
+      "今天，也听见一点进步。",
+      "从一个单词开始，让每一次练习都有迹可循。",
+      `<span class="date-pill">${new Date().toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" })}</span>`,
+    ) +
+    `${state.draft ? `<div class="resume-strip"><span>${icon("save")} 上次练习已保存：${esc(state.draft.title)} · 已填写 ${state.draft.answers.filter(Boolean).length} / ${state.draft.wordIds.length}</span>${button("继续听写 " + icon("arrow"), "resume", "small")}</div>` : ""}<div class="hero-grid"><section class="hero"><div class="hero-copy"><span class="tag">YOUR DAILY LISTENING RITUAL</span><h2>让熟悉的单词，<br>成为听力里的确定感。</h2><p>完整王陆语料库，自选节奏，专注听写。<br>今天的进步，就从下一次播放开始。</p>${button(icon("play") + " 开始今日练习", "daily", "primary")}${button("浏览语料", "library-link", "text")}</div><div class="wave-art" aria-hidden="true">${"<i></i>".repeat(9)}</div></section><section class="panel goal-panel"><div class="panel-top"><h3>今日学习目标</h3>${button("调整目标", "goal", "text small")}</div><div class="goal-body"><div class="goal-ring" style="--progress:${progress}%"><div><strong>${s.todayCount}</strong><span>/ ${goal} 个词</span></div></div><div class="goal-info"><b>${progress >= 100 ? "今日目标已完成" : "给专注留一点时间"}</b><p>${progress >= 100 ? "做得不错，明天继续。" : `再练 ${Math.max(0, goal - s.todayCount)} 个，完成今日目标`}</p><span class="mini">${icon("check")} 每一步都在积累</span></div></div></section></div>` +
+    metrics([
+      ["book", s.totalWords || 0, "词", "累计听写"],
+      ["flame", s.streak || 0, "天", "连续练习"],
+      [
+        "target",
+        s.totalWords ? s.accuracy : "—",
+        s.totalWords ? "%" : "",
+        "整体正确率",
+      ],
+      ["review", dueCount(), "词", "待复习错词"],
+    ]) +
+    `<section><div class="section-header"><div><h2>回到语料，继续积累</h2><p>4 个章节 · 32 个小节 · 5,873 个词条</p></div>${chapterTabs()}</div>${sectionCards(6)}<div style="text-align:center;margin-top:14px">${button("查看全部语料 " + icon("arrow"), "library-link", "text")}</div></section><div class="lower-grid"><section class="panel"><div class="section-header"><h2>最近的练习</h2>${button("全部记录 " + icon("arrow"), "history-link", "text small")}</div>${recentTable(state.history.slice(-3), true)}</section><section class="panel tip-card"><div class="eyebrow">A SMALL REMINDER</div>${icon("info")}<h3>比一遍全对更重要的，<br>是把错词再听一遍。</h3><p>答错的词会自动加入错词本。复习答对后，按 1、3、7、14 天逐步延长间隔，让记忆慢慢稳下来。</p>${button("去复习 " + icon("arrow"), "review-link", "text small")}</section></div>`
+  );
+}
+function library() {
+  return (
+    heading(
+      "YOUR WORD COLLECTION",
+      "每个小节，都是一个小目标。",
+      "按章节练习，或搜索词条；支持整节、分组和自选词序范围。",
+    ) +
+    `<div class="toolbar"><label class="sr-only" for="corpus-search">搜索语料</label><input id="corpus-search" type="search" placeholder="搜索英文单词或中文释义…"><span class="muted">共 5,873 词</span></div><div id="search-results"></div><div class="section-header">${chapterTabs()}</div>${sectionCards()}`
+  );
+}
+function chart(history) {
+  const data = history.slice(-20);
+  if (!data.length)
+    return '<div class="empty">完成练习后，将在这里显示正确率变化。</div>';
+  const points = data.map((h, i) => [
+    45 + (data.length === 1 ? 225 : (i * 450) / (data.length - 1)),
+    148 - (h.correct / h.total) * 120,
+  ]);
+  return `<svg class="chart" viewBox="0 0 530 180" role="img" aria-label="最近 ${data.length} 次练习正确率趋势">${[0, 50, 100].map((n) => `<line x1="40" y1="${148 - n * 1.2}" x2="505" y2="${148 - n * 1.2}" stroke="var(--line)"/><text x="4" y="${152 - n * 1.2}">${n}%</text>`).join("")}<polyline points="${points.map((p) => p.join(",")).join(" ")}" fill="none" stroke="currentColor" stroke-width="2.5"/>${points.map(([x, y], i) => `<circle cx="${x}" cy="${y}" r="4" fill="currentColor"><title>${dateText(data[i].date)}：${Math.round((data[i].correct / data[i].total) * 100)}%</title></circle>`).join("")}<text x="40" y="174">${dateText(data[0].date)}</text><text x="505" y="174" text-anchor="end">${dateText(data.at(-1).date)}</text></svg>`;
+}
+function sectionPage() {
+  const s = sections.find((x) => x.id === currentSection),
+    hs = sectionHistory(s.id),
+    last = hs.at(-1),
+    best = hs.length
+      ? Math.max(...hs.map((h) => (h.correct / h.total) * 100))
+      : 0,
+    avg = hs.length
+      ? hs.reduce((a, h) => a + (h.correct / h.total) * 100, 0) / hs.length
+      : 0;
+  return (
+    heading(
+      "ONE SECTION AT A TIME",
+      `第 ${esc(s.id)} 节`,
+      `${s.words.length} 个词条 · ${hs.length} 次练习`,
+      button(icon("back") + " 返回语料", "library-link"),
+    ) +
+    metrics([
+      [
+        "target",
+        last ? Math.round((last.correct / last.total) * 100) : "—",
+        last ? "%" : "",
+        "最近一次",
+      ],
+      [
+        "chart",
+        hs.length ? Math.round(best) : "—",
+        hs.length ? "%" : "",
+        "最高正确率",
+      ],
+      [
+        "check",
+        hs.length ? Math.round(avg) : "—",
+        hs.length ? "%" : "",
+        "平均正确率",
+      ],
+      ["book", hs.length, "次", "本节练习"],
+    ]) +
+    `<div class="section-detail-grid"><section class="panel"><h2>设置这次练习</h2><p class="muted">按原始语料顺序，选择适合今天的练习量。</p><div class="field"><label for="batch-size">练习数量</label><select id="batch-size"><option value="20">轻量一组 · 20 词</option><option value="50" selected>标准一组 · 50 词</option><option value="100">集中练习 · 100 词</option><option value="all">本节全部 · ${s.words.length} 词</option><option value="range">自选词序范围</option></select></div><div class="form-row"><div class="field"><label for="range-start">起始词序</label><input id="range-start" type="number" min="1" max="${s.words.length}" value="1"></div><div class="field"><label for="range-end">结束词序（自选范围时）</label><input id="range-end" type="number" min="1" max="${s.words.length}" value="${Math.min(50, s.words.length)}"></div></div><div class="flex" style="margin-top:24px">${button(icon("play") + " 开始听写", "start-section", "primary")}${button(icon("shuffle") + " 乱序测试", "start-shuffle")}</div><p class="muted" style="font-size:11px;margin-top:12px">乱序仅打乱本次选定范围；Enter 下一题，F2 重听。</p></section><section class="panel"><h2>正确率趋势</h2><p class="muted">最近 20 次练习</p>${chart(hs)}${hs.length > 1 ? `<p class="muted">较上次：${Math.round((last.correct / last.total) * 100 - (hs.at(-2).correct / hs.at(-2).total) * 100)} 个百分点</p>` : ""}</section></div><section style="margin-top:26px"><div class="section-header"><h2>本节练习记录</h2>${button("查看本节词表", "preview-words", "small")}</div>${recentTable(hs)}</section>`
+  );
+}
+function begin(words, title, sectionId, mode = "normal", force = false) {
+  if (!words.length) {
+    toast("当前没有可练习的词条。");
+    return;
+  }
+  if (state.draft && !force) {
+    modal(
+      "开始新的练习？",
+      `<p>还有一份未完成的「${esc(state.draft.title)}」。开始新练习会替换这份草稿，历史记录不受影响。</p>`,
+      [
+        {
+          label: "继续原练习",
+          action: () => {
+            closeModal();
+            resume();
+          },
+        },
+        {
+          label: "开始新练习",
+          primary: true,
+          action: () => {
+            closeModal();
+            begin(words, title, sectionId, mode, true);
+          },
+        },
+      ],
+    );
+    return;
+  }
+  stop();
+  const ordered = mode === "shuffle" ? shuffle(words) : words;
+  session = {
+    id: crypto.randomUUID(),
+    sectionId,
+    title,
+    mode,
+    wordIds: ordered.map((w) => w.id),
+    words: ordered,
+    answers: ordered.map(() => ""),
+    activeIndex: 0,
+    startedAt: new Date().toISOString(),
+    elapsed: 0,
+  };
+  startedSegment = Date.now();
+  activeIndex = 0;
+  alignment = [];
+  saveDraft();
+  page = "practice";
+  render();
+  window.scrollTo(0, 0);
+  $("#answer-0")?.focus();
+}
+function shuffle(words) {
+  const a = [...words];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+function resume() {
+  const d = state.draft,
+    words = wordsForDraft(d);
+  if (!d || words.length !== d.wordIds.length) {
+    toast("这份草稿词条不完整，请导出备份后重新开始。");
+    return;
+  }
+  session = {
+    ...d,
+    words,
+    answers: words.map((_, i) => String(d.answers[i] || "")),
+  };
+  activeIndex = Math.max(0, Math.min(words.length - 1, d.activeIndex || 0));
+  startedSegment = Date.now();
+  page = "practice";
+  alignment = [];
+  render();
+  $(`#answer-${activeIndex}`)?.focus();
+}
+function practicePage() {
+  return `<div class="session-head"><div><div class="eyebrow">LISTEN. TYPE. REPEAT.</div><h1>${esc(session.title)}</h1><p>${modeLabel(session.mode)} · ${session.words.length} 词 · <span id="answered-count">${session.answers.filter((a) => a.trim()).length}</span> 已填写 · 草稿自动保存</p></div>${button(icon("save") + " 保存并退出", "save-exit")}</div><div class="practice-toolbar"><div class="toolbar">${button(icon("sound") + " 重听当前词", "replay", "primary")}${button(icon("play") + " 连播", "block")}${button("自动发音：" + (state.settings.autoPlay ? "开" : "关"), "auto", state.settings.autoPlay ? "soft" : "")}${button(icon("settings") + " 发音设置", "audio-settings")}<span class="muted" style="font-size:10px;margin-left:auto"><kbd class="keyboard">F2</kbd> 重听 · <kbd class="keyboard">Enter</kbd> 下一题</span></div><div id="audio-status" class="audio-status" aria-live="polite">点击喇叭开始听写。词典与在线备用发音需要联网。</div></div><div class="flex space" style="margin:14px 0"><span class="muted" style="font-size:11px">答案填错行？先选中需要调整的输入框。</span><div class="flex">${button("插入空行 ↓", "align-down", "small")}${button("答案上移 ↑", "align-up", "small")}${button("撤销调整", "align-undo", "small")}</div></div><div class="practice-list">${session.words.map((w, i) => `<div class="dict-row" id="row-${i}"><span class="num">${i + 1}</span>${button(icon("sound"), "speak", "text", `data-index="${i}" aria-label="播放第 ${i + 1} 词"`)}<label class="sr-only" for="answer-${i}">第 ${i + 1} 题答案</label><input id="answer-${i}" data-answer="${i}" value="${esc(session.answers[i])}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="听音后输入…" enterkeyhint="next"><div class="answer-feedback" hidden></div></div>`).join("")}</div><div class="practice-end"><span>支持常见英美拼写；忽略大小写和首尾空格。<br>「检查答案」不写入历史；提交后才记录本次成绩。</span><div class="flex">${button("检查答案", "check")}${button("提交听写 " + icon("check"), "finish", "primary")}</div></div>`;
+}
+function getResults() {
+  return session.words.map((w, i) => ({
+    wordId: w.id,
+    text: w.text,
+    meaning: w.meaning || "",
+    phonetic: w.phonetic || "",
+    sectionId: w.sectionId,
+    typed: session.answers[i] || "",
+    ok: gradeAnswer(session.answers[i] || "", w.text),
+  }));
+}
+function check() {
+  stop();
+  getResults().forEach((r, i) => {
+    const row = $(`#row-${i}`);
+    row.classList.remove("good", "bad");
+    row.classList.add(r.ok ? "good" : "bad");
+    const el = row.querySelector(".answer-feedback");
+    el.hidden = false;
+    el.innerHTML = `<span class="${r.ok ? "good-text" : "bad-text"}">${r.ok ? "✓ 正确" : "正确答案：" + esc(r.text)}</span> <span class="muted">${esc(r.meaning)}</span>`;
+  });
+  toast("已检查，尚未计入历史。修改后提交会重新批改。");
+}
+function finish(confirmed = false) {
+  if (!session) return;
+  const empty = session.answers.filter((a) => !a.trim()).length;
+  if (empty && !confirmed) {
+    modal(
+      "还有未填写的题目",
+      `<p>${empty} 个空白答案将计为错误，并加入错词本。你可以继续作答，也可以直接提交。</p>`,
+      [
+        { label: "继续作答", action: closeModal },
+        {
+          label: "确认提交",
+          primary: true,
+          action: () => {
+            closeModal();
+            finish(true);
+          },
+        },
+      ],
+    );
+    return;
+  }
+  stop();
+  const results = getResults(),
+    correct = results.filter((r) => r.ok).length,
+    h = {
+      id: session.id,
+      sectionId: session.sectionId,
+      title: session.title,
+      mode: session.mode,
+      date: new Date().toISOString(),
+      duration: Math.round(elapsed()),
+      total: results.length,
+      correct,
+      results,
+    };
+  if (!state.history.some((x) => x.id === h.id)) {
+    state.history.push(h);
+    for (const r of results) {
+      const old = state.reviews[r.wordId];
+      if (!r.ok || old)
+        state.reviews[r.wordId] = {
+          ...old,
+          ...r,
+          ...updateReview(old, r.ok),
+          lastTyped: r.typed,
+        };
+    }
+  }
+  state.draft = null;
+  session = null;
+  startedSegment = 0;
+  persist();
+  lastResult = h;
+  resultFilter = "wrong";
+  page = "result";
+  render();
+  window.scrollTo(0, 0);
+}
+function resultList(results) {
+  if (!results.length)
+    return (
+      '<div class="empty">' +
+      icon("check") +
+      "<p>这一组全部答对了，继续保持。</p></div>"
+    );
+  return `<div class="panel" style="padding:0">${results.map((r) => `<div class="result-row"><span class="${r.ok ? "good-text" : "bad-text"}">${r.ok ? "✓" : "×"}</span><div><span class="word">${esc(r.text)}</span><div class="meaning">${esc(r.phonetic)} ${esc(r.meaning)}</div></div><div class="${r.ok ? "correct" : "answer"}">${esc(r.typed || "（未填写）")}</div>${button(icon("sound"), "speak-word", "text", `data-text="${esc(r.text)}" aria-label="播放 ${esc(r.text)}"`)}</div>`).join("")}</div>`;
+}
+function resultPage() {
+  const h = lastResult;
+  return (
+    heading(
+      "EVERY TRY COUNTS",
+      "这一遍，完成了。",
+      `${esc(h.title || h.sectionId)} · ${modeLabel(h.mode)} · ${dateText(h.date)}`,
+    ) +
+    `<section class="panel results-hero"><div><div class="score">${Math.round((h.correct / h.total) * 100)}<small>%</small></div><span class="muted">本次正确率</span></div><div><h2>${h.correct === h.total ? "全部答对，记得按时复习。" : "找到错词，就是进步的开始。"}</h2><p class="muted">答对 ${h.correct} / ${h.total} 词 · 用时 ${Math.floor((h.duration || 0) / 60)} 分 ${(h.duration || 0) % 60} 秒</p><div class="flex">${button(icon("review") + " 重练本次错词", "retry-wrong", "primary", h.results.some((r) => !r.ok) ? "" : "disabled")}${button(h.results.length < h.total ? "重练已有词条" : "再练一次", "retry", "", h.results.length ? "" : "disabled")}${button(icon("shuffle") + " 乱序重练", "retry-shuffle", "", h.results.length ? "" : "disabled")}</div></div></section><div class="section-header"><h2>逐词批改</h2><div class="tabs"><button data-result-filter="wrong" class="${resultFilter === "wrong" ? "active" : ""}">错词 ${h.results.filter((r) => !r.ok).length}</button><button data-result-filter="all" class="${resultFilter === "all" ? "active" : ""}">全部 ${h.results.length}</button></div></div>${h.results.length < h.total ? '<div class="notice">旧版备份只保留了部分答题明细。总成绩仍按原记录显示，下方仅列出已有词条；重练也仅包含这些词条。</div>' : ""}${h.results.length ? resultList(h.results.filter((r) => resultFilter === "all" || !r.ok)) : '<div class="empty">这是一条旧版汇总记录，没有逐词详情。</div>'}`
+  );
+}
+function reviewPage() {
+  return (
+    heading(
+      "MAKE THE WORDS STICK",
+      "错过的词，再听一遍。",
+      "复习会更新记忆间隔，历史错误次数保留；连续答对 3 次标记为已掌握。",
+      button(icon("download") + " 导出错词 CSV", "export-words"),
+    ) +
+    `<div class="section-header"><div class="tabs">${[
+      ["all", "全部错词"],
+      ["due", "到期复习"],
+      ["active", "巩固中"],
+      ["mastered", "已掌握"],
+    ]
+      .map(
+        ([id, l]) =>
+          `<button data-review-filter="${id}" class="${reviewFilter === id ? "active" : ""}">${l} ${reviewWords(id).length}</button>`,
+      )
+      .join(
+        "",
+      )}</div><div class="flex">${button(icon("play") + " 练习当前筛选", "review-selected", "primary")}${button("复习今日到期词", "review-due")}</div></div><div class="toolbar"><label class="sr-only" for="review-search">搜索错词</label><input id="review-search" type="search" value="${esc(reviewSearch)}" placeholder="搜索错词或释义…"><label class="sr-only" for="review-chapter">错词小节</label><select id="review-chapter"><option value="">全部小节</option>${sections.map((s) => `<option value="${s.id}" ${reviewChapter === s.id ? "selected" : ""}>第 ${s.id} 节</option>`).join("")}</select><label class="sr-only" for="review-sort">错词排序</label><select id="review-sort"><option value="count" ${reviewSort === "count" ? "selected" : ""}>错误次数最多</option><option value="date" ${reviewSort === "date" ? "selected" : ""}>最近练习优先</option><option value="chapter" ${reviewSort === "chapter" ? "selected" : ""}>按小节分组</option></select></div><div id="review-table">${reviewTable()}</div>`
+  );
+}
+function filteredReviews() {
+  const q = reviewSearch.trim().toLowerCase();
+  return reviewWords()
+    .filter(
+      (w) =>
+        (!reviewChapter || w.sectionId === reviewChapter) &&
+        (!q || `${w.text} ${w.meaning}`.toLowerCase().includes(q)),
+    )
+    .sort((a, b) =>
+      reviewSort === "date"
+        ? new Date(b.date) - new Date(a.date)
+        : reviewSort === "chapter"
+          ? String(a.sectionId).localeCompare(String(b.sectionId), undefined, {
+              numeric: true,
+            })
+          : b.wrongCount - a.wrongCount,
+    );
+}
+function reviewTable() {
+  const words = filteredReviews();
+  if (!words.length)
+    return `<section class="panel empty">${icon("review")}<p>${Object.keys(state.reviews).length ? "这个筛选下没有错词。" : "错词本还是空的，开始一次练习吧。"}</p>${button("去语料库练习", "library-link", "soft")}</section>`;
+  return `<div class="muted" style="font-size:11px;margin-bottom:10px">当前 ${words.length} 词 · 点击小节可打开练习设置</div><div class="table-wrap"><table><thead><tr><th>单词 / 短语</th><th>上次填写</th><th>小节</th><th>错误次数</th><th>复习状态</th><th>发音</th></tr></thead><tbody>${words.map((w) => `<tr><td><span class="word">${esc(w.text)}</span><span class="sub">${esc(w.phonetic)} ${esc(w.meaning)}</span></td><td class="bad-text">${esc(w.lastTyped || "—")}</td><td>${button(esc(w.sectionId || "旧版"), "section", "text small", `data-id="${esc(w.sectionId)}"`)}</td><td>${w.wrongCount}</td><td><span class="chip ${w.streak >= 3 ? "green" : new Date(w.due) <= new Date() ? "red" : "purple"}">${new Date(w.due) <= new Date() ? "待复习" : w.streak >= 3 ? "已掌握" : "巩固中"}</span><span class="sub">${new Date(w.due).toLocaleDateString("zh-CN")}</span></td><td>${button(icon("sound"), "speak-word", "text small", `data-text="${esc(w.text)}" aria-label="播放 ${esc(w.text)}"`)}</td></tr>`).join("")}</tbody></table></div>`;
+}
+function historyPage() {
+  const hs = state.history.filter(
+      (h) => !historySection || h.sectionId === historySection,
+    ),
+    stats = computeStats(hs);
+  return (
+    heading(
+      "YOUR PROGRESS, MADE VISIBLE",
+      "进步，有迹可循。",
+      "每次提交都保留原始答案，回看正确率，也回看那些终于写对的词。",
+    ) +
+    metrics([
+      ["book", stats.totalSessions || 0, "次", "累计练习"],
+      ["check", stats.totalWords || 0, "词", "累计听写"],
+      [
+        "target",
+        hs.length ? stats.accuracy : "—",
+        hs.length ? "%" : "",
+        "整体正确率",
+      ],
+      [
+        "clock",
+        Math.round(hs.reduce((n, h) => n + (h.duration || 0), 0) / 60),
+        "分钟",
+        "累计用时",
+      ],
+    ]) +
+    `<section class="panel"><h2>最近 20 次正确率</h2>${chart(hs)}</section><div class="toolbar"><h2 style="margin-right:auto">练习记录</h2><label class="sr-only" for="history-section">按小节筛选历史</label><select id="history-section"><option value="">全部小节</option>${sections.map((s) => `<option value="${s.id}" ${historySection === s.id ? "selected" : ""}>第 ${s.id} 节</option>`).join("")}</select></div>${recentTable(hs)}`
+  );
+}
+function audioFields() {
+  const s = state.settings;
+  return `<div class="form-row"><div class="field"><label for="set-accent">发音口音</label><select id="set-accent" data-setting="accent"><option value="en-GB" ${s.accent === "en-GB" ? "selected" : ""}>英式英语</option><option value="en-US" ${s.accent === "en-US" ? "selected" : ""}>美式英语</option></select></div><div class="field"><label for="set-mode">发音方式</label><select id="set-mode" data-setting="mode"><option value="speech" ${s.mode === "speech" ? "selected" : ""}>合成语音（优先本机）</option><option value="dictionary" ${s.mode === "dictionary" ? "selected" : ""}>词典发音（需要联网）</option></select></div></div><div class="form-row"><div class="field"><label for="set-rate">语速</label><select id="set-rate" data-setting="rate">${[
+    [0.65, "很慢 · 0.65×"],
+    [0.85, "慢速 · 0.85×"],
+    [1, "正常 · 1×"],
+    [1.2, "快速 · 1.2×"],
+  ]
+    .map(
+      ([v, l]) =>
+        `<option value="${v}" ${s.rate === v ? "selected" : ""}>${l}</option>`,
+    )
+    .join(
+      "",
+    )}</select></div><div class="field"><label for="set-repeat">每词重复</label><select id="set-repeat" data-setting="repeat">${[1, 2, 3].map((v) => `<option value="${v}" ${s.repeat === v ? "selected" : ""}>${v} 次</option>`).join("")}</select></div></div><div class="form-row"><div class="field"><label for="set-interval">连播间隔</label><select id="set-interval" data-setting="interval">${[1, 2, 3, 5, 8].map((v) => `<option value="${v}" ${s.interval === v ? "selected" : ""}>${v} 秒</option>`).join("")}</select></div><div class="field"><label for="set-voiceURI">本机英语语音</label><select id="set-voiceURI" data-setting="voiceURI"><option value="">自动选择</option>${speech
+    .listVoices()
+    .map(
+      (v) =>
+        `<option value="${esc(v.voiceURI)}" ${s.voiceURI === v.voiceURI ? "selected" : ""}>${esc(v.name)} (${esc(v.lang)})</option>`,
+    )
+    .join(
+      "",
+    )}</select></div></div><div class="field row"><input id="set-autoPlay" type="checkbox" data-setting="autoPlay" ${s.autoPlay ? "checked" : ""}><label for="set-autoPlay">输入框获得焦点时自动朗读</label></div><div class="flex" style="margin-top:15px">${button(icon("sound") + " 测试语音", "test-voice", "soft")}<small class="muted">播放 accommodation</small></div><div class="audio-status audio-settings-status" role="status" aria-live="polite">点击测试可检查此设备的发音。</div>`;
+}
+function settingsPage() {
+  return (
+    heading(
+      "MAKE IT YOURS",
+      "按自己的节奏，练习。",
+      "偏好自动保存。学习数据保留在当前浏览器，请定期备份。",
+    ) +
+    `<div class="settings-grid"><section class="panel"><h2>听写与发音</h2>${audioFields()}<p class="muted" style="font-size:11px;margin-top:18px">本机语音由浏览器和系统提供；若未安装英语语音，将尝试在线备用源。短语优先合成语音。这里的发音不是原书配套录音。</p></section><div class="stack"><section class="panel"><h2>我的学习偏好</h2><div class="form-row"><div class="field"><label for="set-dailyGoal">每日目标（词）</label><input id="set-dailyGoal" data-setting="dailyGoal" type="number" min="1" max="1000" value="${state.settings.dailyGoal}"></div><div class="field"><label for="set-theme">界面主题</label><select id="set-theme" data-setting="theme"><option value="light" ${state.settings.theme === "light" ? "selected" : ""}>浅色 · 安静书桌</option><option value="dark" ${state.settings.theme === "dark" ? "selected" : ""}>深色 · 夜间练习</option><option value="system" ${state.settings.theme === "system" ? "selected" : ""}>跟随系统</option></select></div></div></section><section class="panel"><h2>备份与迁移</h2><p class="muted" style="font-size:12px;margin-top:9px">备份包含练习历史、错词、设置和未完成草稿。不同设备之间可通过备份文件手动迁移，不会自动云同步。</p><div class="flex">${button(icon("download") + " 导出全部数据", "export", "primary")}${button(icon("upload") + " 导入数据", "import")}${button("导出错词 CSV", "export-words", "small")}</div><p class="muted" style="font-size:11px;margin-top:14px">兼容原项目 wl2 / wl3 的 {hist, wb} 备份；导入前自动下载当前数据备份。文件内容只在本地处理。</p></section><section class="panel"><h2>离线使用</h2><p class="muted" style="font-size:12px;margin-top:9px">首次联网打开后会缓存页面和全部语料。支持的浏览器可将本站添加到主屏幕。本机英语语音可离线使用；词典及在线备用发音仍需联网。</p>${button("刷新离线缓存", "update-cache", "small")}</section></div></div><section class="panel danger-zone"><h3>清空本机学习数据</h3><p class="muted" style="font-size:12px">仅清除此页面在当前浏览器中的数据。请先导出备份。</p>${button("清空数据…", "clear", "danger small")}</section>`
+  );
+}
+function render() {
+  document.body.dataset.theme =
+    state.settings.theme === "system"
+      ? matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light"
+      : state.settings.theme;
+  const content = (
+    {
+      home,
+      library,
+      section: sectionPage,
+      practice: practicePage,
+      result: resultPage,
+      review: reviewPage,
+      history: historyPage,
+      settings: settingsPage,
+    }[page] || home
+  )();
+  $("#app").innerHTML = shell(content);
+  document.title = `${page === "practice" ? session.title + " · " : ""}听见进步 · 王陆语料库`;
+}
+function modal(title, body, actions = []) {
+  stop();
+  $("#dialog-body").innerHTML =
+    `<div class="dialog-head"><h2>${title}</h2>${button(icon("close"), "close-modal", "text", 'aria-label="关闭弹窗"')}</div>${body}<div id="dialog-error" class="dialog-error" role="alert"></div><div class="dialog-actions">${actions.map((a, i) => `<button class="button ${a.primary ? "primary" : ""}" data-modal-action="${i}">${a.label}</button>`).join("")}</div>`;
+  $("#dialog").showModal();
+  actions.forEach((a, i) =>
+    $(`[data-modal-action="${i}"]`).addEventListener("click", a.action),
+  );
+}
+function closeModal() {
+  speech.stop();
+  $("#dialog").close();
+}
+function download(data, name, type = "application/json") {
+  const url = URL.createObjectURL(new Blob([data], { type })),
+    a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+function exportData() {
+  if (session) saveDraft();
+  if (storageBlocked) {
+    try {
+      download(
+        localStorage.getItem(KEY) || "{}",
+        `wanglu-original-${localDateKey()}.json`,
+      );
+    } catch {
+      toast("浏览器禁止读取存储。");
+    }
+    return;
+  }
+  download(
+    JSON.stringify(
+      { app: "wanglu-personal", exportedAt: new Date().toISOString(), state },
+      null,
+      2,
+    ),
+    `wanglu-backup-${localDateKey()}.json`,
+  );
+  toast("备份文件已生成。");
+}
+function exportWords() {
+  const rows = [
+    [
+      "单词",
+      "音标",
+      "释义",
+      "小节",
+      "错误次数",
+      "连续答对",
+      "下次复习",
+      "上次填写",
+    ],
+    ...reviewWords("all").map((w) => [
+      w.text,
+      w.phonetic,
+      w.meaning,
+      w.sectionId,
+      w.wrongCount,
+      w.streak,
+      w.due,
+      w.lastTyped,
+    ]),
+  ];
+  const cell = (v) =>
+    '"' +
+    String(v ?? "")
+      .replace(/^[=+@-]/, "'$&")
+      .replace(/"/g, '""') +
+    '"';
+  download(
+    "\uFEFF" + rows.map((r) => r.map(cell).join(",")).join("\r\n"),
+    `wanglu-wrong-words-${localDateKey()}.csv`,
+    "text/csv;charset=utf-8",
+  );
+}
+function importDialog() {
+  modal(
+    "导入学习数据",
+    `<p class="muted">选择本站备份文件，或粘贴原版导出的 {hist, wb} JSON。成功校验后再确认替换。</p><div class="field"><label for="import-file">JSON 备份文件（最多 20 MB）</label><input type="file" id="import-file" accept=".json,application/json"></div><div class="field"><label for="import-text">或粘贴备份内容</label><textarea id="import-text" rows="6" placeholder='{"hist":{},"wb":{}}'></textarea></div><details style="font-size:11px;margin-top:12px"><summary>如何从原项目导出？</summary><p>在原项目页面打开浏览器开发者工具的 Console，执行以下代码，然后将复制的 JSON 粘贴到上方：</p><code style="overflow-wrap:anywhere">copy(JSON.stringify({hist:JSON.parse(localStorage.getItem('wl3_hist')||localStorage.getItem('wl2_hist')||'{}'),wb:JSON.parse(localStorage.getItem('wl3_wb')||localStorage.getItem('wl2_wb')||'{}')}))</code></details>`,
+    [
+      { label: "取消", action: closeModal },
+      {
+        label: "校验并继续",
+        primary: true,
+        action: async () => {
+          try {
+            const f = $("#import-file").files[0];
+            if (f && f.size > 20 * 1024 * 1024) throw Error("文件超过 20 MB。");
+            const raw = f ? await f.text() : $("#import-text").value,
+              next = parseBackup(raw, allWords);
+            modal(
+              "备份校验通过",
+              `<p>将导入 ${next.history.length} 条历史记录、${Object.keys(next.reviews).length} 个错词${next.draft ? "，以及未完成草稿" : ""}。</p><p>确认后会先下载当前数据备份，再用导入数据替换本机数据。</p>`,
+              [
+                { label: "取消", action: closeModal },
+                {
+                  label: "备份并导入",
+                  primary: true,
+                  action: () => {
+                    exportData();
+                    const prior = state;
+                    state = next;
+                    storageBlocked = false;
+                    if (!persist()) {
+                      state = prior;
+                      return;
+                    }
+                    storageMessage = "";
+                    closeModal();
+                    navigate("home");
+                    toast("数据导入成功。");
+                  },
+                },
+              ],
+            );
+          } catch (e) {
+            $("#dialog-error").textContent = "无法导入：" + e.message;
+          }
+        },
+      },
+    ],
+  );
+}
+async function speakRow(i) {
+  if (!session) return false;
+  const token = ++rowPlayToken;
+  activeIndex = i;
+  const w = session.words[i];
+  if (!w) return false;
+  document
+    .querySelectorAll(".dict-row.playing")
+    .forEach((e) => e.classList.remove("playing"));
+  const row = $(`#row-${i}`);
+  row?.classList.add("playing");
+  const ok = await speech.speak(w.text, state.settings);
+  if (token === rowPlayToken) row?.classList.remove("playing");
+  return ok;
+}
+async function block() {
+  if (blockPlaying) {
+    stop();
+    return;
+  }
+  stop();
+  blockPlaying = true;
+  const token = blockToken;
+  const b = $('[data-action="block"]');
+  if (b) b.innerHTML = icon("pause") + " 停止连播";
+  let start = session.answers.findIndex(
+    (a, i) => i >= activeIndex && !a.trim(),
+  );
+  if (start < 0) start = session.answers.findIndex((a) => !a.trim());
+  if (start < 0) start = activeIndex;
+  for (
+    let i = start;
+    session && i < session.words.length && token === blockToken;
+    i++
+  ) {
+    activeIndex = i;
+    const input = $(`#answer-${i}`);
+    input?.focus();
+    input?.scrollIntoView({ block: "center", behavior: "smooth" });
+    const ok = await speakRow(i);
+    if (!ok || token !== blockToken) break;
+    await new Promise((r) =>
+      setTimeout(r, Number(state.settings.interval) * 1000),
+    );
+  }
+  if (token === blockToken) {
+    blockPlaying = false;
+    const el = $('[data-action="block"]');
+    if (el) el.innerHTML = icon("play") + " 连播";
+  }
+}
+function align(direction) {
+  if (!session) return;
+  if (direction === "undo") {
+    const old = alignment.pop();
+    if (!old) {
+      toast("没有可撤销的调整。");
+      return;
+    }
+    session.answers = old;
+  } else {
+    if (direction === "down" && session.answers.at(-1)?.trim()) {
+      toast("末题已有答案，插入会挤掉末题。请先复制或移走末题答案。");
+      return;
+    }
+    alignment.push([...session.answers]);
+    if (alignment.length > 20) alignment.shift();
+    if (direction === "down") {
+      session.answers.splice(activeIndex, 0, "");
+      session.answers.pop();
+    } else {
+      session.answers.splice(activeIndex, 1);
+      session.answers.push("");
+    }
+  }
+  stop();
+  saveDraft();
+  render();
+  $(`#answer-${activeIndex}`)?.focus();
+}
+function openSection(id) {
+  if (!sections.some((s) => s.id === id)) {
+    toast("这是旧版自定义词条，可以从错词本直接复习。");
+    return;
+  }
+  currentSection = id;
+  navigate("section");
+}
+function startSection(mode) {
+  const s = sections.find((s) => s.id === currentSection),
+    size = $("#batch-size").value,
+    start = Number($("#range-start").value),
+    end =
+      size === "all"
+        ? s.words.length
+        : size === "range"
+          ? Number($("#range-end").value)
+          : Math.min(s.words.length, start + Number(size) - 1);
+  if (
+    !Number.isInteger(start) ||
+    !Number.isInteger(end) ||
+    start < 1 ||
+    end < start ||
+    end > s.words.length
+  ) {
+    toast("请填写有效的词序范围。");
+    return;
+  }
+  begin(
+    s.words.slice(start - 1, end),
+    `第 ${s.id} 节 · ${start}–${end} 词`,
+    s.id,
+    mode,
+  );
+}
+function resultWords(results) {
+  return results
+    .map(
+      (r) =>
+        wordById.get(r.wordId) || {
+          id: r.wordId,
+          text: r.text,
+          meaning: r.meaning,
+          phonetic: r.phonetic,
+          sectionId: r.sectionId,
+        },
+    )
+    .filter((w) => w.text);
+}
+const actions = {
+  "library-link": () => navigate("library"),
+  "review-link": () => navigate("review"),
+  "history-link": () => navigate("history"),
+  section: (el) => openSection(el.dataset.id),
+  daily: () => {
+    if (state.draft) {
+      resume();
+      return;
+    }
+    const today = computeStats(state.history).todayCount,
+      count = Math.max(20, Math.min(50, state.settings.dailyGoal - today)),
+      seen = new Set(
+        state.history.flatMap((h) => h.results.map((r) => r.wordId)),
+      ),
+      s =
+        sections.find((s) => s.words.some((w) => !seen.has(w.id))) ||
+        sections[0],
+      words = s.words.filter((w) => !seen.has(w.id));
+    begin(
+      (words.length ? words : s.words).slice(0, count),
+      `今日练习 · 第 ${s.id} 节`,
+      s.id,
+    );
+  },
+  resume,
+  "start-section": () => startSection("normal"),
+  "start-shuffle": () => startSection("shuffle"),
+  "save-exit": () => navigate("home"),
+  replay: () => {
+    stop();
+    speakRow(activeIndex);
+  },
+  speak: (el) => {
+    stop();
+    speakRow(Number(el.dataset.index));
+  },
+  "speak-word": (el) => {
+    stop();
+    speech.speak(el.dataset.text, state.settings);
+  },
+  block,
+  auto: () => {
+    state.settings.autoPlay = !state.settings.autoPlay;
+    persist();
+    const b = $('[data-action="auto"]');
+    b.textContent = "自动发音：" + (state.settings.autoPlay ? "开" : "关");
+    b.classList.toggle("soft", state.settings.autoPlay);
+  },
+  "audio-settings": () =>
+    modal("发音设置", audioFields(), [
+      { label: "完成", primary: true, action: closeModal },
+    ]),
+  "test-voice": () => speech.speak("accommodation", state.settings),
+  "align-down": () => align("down"),
+  "align-up": () => align("up"),
+  "align-undo": () => align("undo"),
+  check,
+  finish: () => finish(),
+  retry: () =>
+    begin(
+      resultWords(lastResult.results),
+      lastResult.title,
+      lastResult.sectionId,
+      lastResult.mode,
+    ),
+  "retry-shuffle": () =>
+    begin(
+      resultWords(lastResult.results),
+      lastResult.title,
+      lastResult.sectionId,
+      "shuffle",
+    ),
+  "retry-wrong": () =>
+    begin(
+      resultWords(lastResult.results.filter((r) => !r.ok)),
+      lastResult.title + " · 错词复练",
+      lastResult.sectionId,
+      "review",
+    ),
+  "history-detail": (el) => {
+    lastResult = state.history.find((h) => h.id === el.dataset.id);
+    resultFilter = "wrong";
+    navigate("result");
+  },
+  "review-selected": () =>
+    begin(
+      filteredReviews(),
+      "错词专项复习",
+      reviewChapter || "review",
+      "review",
+    ),
+  "review-due": () =>
+    begin(reviewWords("due"), "今日到期复习", "review", "review"),
+  "preview-words": () => {
+    const s = sections.find((s) => s.id === currentSection);
+    modal(
+      `第 ${esc(s.id)} 节词表`,
+      `<div class="word-preview">${s.words.map((w, i) => `<div class="flex space" style="border-bottom:1px solid var(--line);padding:9px 0"><span>${i + 1}. <b>${esc(w.text)}</b> <span class="muted">${esc(w.meaning)}</span></span>${button(icon("sound"), "speak-word", "text small", `data-text="${esc(w.text)}" aria-label="播放 ${esc(w.text)}"`)}</div>`).join("")}</div>`,
+      [{ label: "关闭", action: closeModal }],
+    );
+  },
+  goal: () =>
+    modal(
+      "给今天定一个小目标",
+      `<div class="field"><label for="goal-input">每日目标（1–1000 词）</label><input id="goal-input" type="number" min="1" max="1000" value="${state.settings.dailyGoal}"></div>`,
+      [
+        {
+          label: "保存目标",
+          primary: true,
+          action: () => {
+            const n = Number($("#goal-input").value);
+            if (!Number.isInteger(n) || n < 1 || n > 1000) {
+              $("#dialog-error").textContent = "请输入 1–1000 的整数。";
+              return;
+            }
+            state.settings.dailyGoal = n;
+            persist();
+            closeModal();
+            render();
+          },
+        },
+      ],
+    ),
+  export: exportData,
+  "export-words": exportWords,
+  import: importDialog,
+  "close-modal": closeModal,
+  clear: () =>
+    modal(
+      "清空本机学习数据",
+      `<p>此操作会移除全部历史、错词、草稿和偏好。请先导出备份。</p><label class="field" for="clear-confirm">输入「清空」以继续<input id="clear-confirm" placeholder="清空" autocomplete="off"></label>`,
+      [
+        { label: "取消", action: closeModal },
+        { label: "导出备份", action: exportData },
+        {
+          label: "确认清空",
+          action: () => {
+            if ($("#clear-confirm").value !== "清空") {
+              $("#dialog-error").textContent = "请输入「清空」。";
+              return;
+            }
+            const previous = state;
+            state = createInitialState();
+            storageBlocked = false;
+            if (!persist()) {
+              state = previous;
+              return;
+            }
+            storageMessage = "";
+            closeModal();
+            navigate("home");
+            toast("本机学习数据已清空。");
+          },
+        },
+      ],
+    ),
+  "update-cache": async () => {
+    const r = await navigator.serviceWorker?.getRegistration();
+    if (!r) {
+      toast("离线缓存尚未就绪，请联网刷新页面。");
+      return;
+    }
+    await r.update();
+    toast("已检查更新；新版本将在所有本站标签页关闭后启用。");
+  },
+};
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("button,a");
+  if (!el) return;
+  if (el.dataset.nav) {
+    e.preventDefault();
+    navigate(el.dataset.nav);
+    return;
+  }
+  if (el.dataset.chapter) {
+    chapterFilter = el.dataset.chapter;
+    render();
+    return;
+  }
+  if (el.dataset.reviewFilter) {
+    reviewFilter = el.dataset.reviewFilter;
+    render();
+    return;
+  }
+  if (el.dataset.resultFilter) {
+    resultFilter = el.dataset.resultFilter;
+    render();
+    return;
+  }
+  if (el.dataset.action && actions[el.dataset.action]) {
+    e.preventDefault();
+    Promise.resolve(actions[el.dataset.action](el)).catch((err) => {
+      console.error(err);
+      toast("操作未完成：" + err.message);
+    });
+  }
+});
+document.addEventListener("input", (e) => {
+  const el = e.target;
+  if (el.dataset.answer !== undefined && session) {
+    const i = Number(el.dataset.answer);
+    session.answers[i] = el.value;
+    activeIndex = i;
+    const row = $(`#row-${i}`);
+    row.classList.remove("good", "bad");
+    row.querySelector(".answer-feedback").hidden = true;
+    $("#answered-count").textContent = session.answers.filter((a) =>
+      a.trim(),
+    ).length;
+    saveDraft();
+  }
+  if (el.id === "corpus-search") {
+    const q = el.value.trim().toLowerCase(),
+      matches = q
+        ? allWords.filter((w) =>
+            `${w.text} ${w.meaning}`.toLowerCase().includes(q),
+          )
+        : [];
+    $("#search-results").innerHTML = q
+      ? `<div class="search-results"><p class="muted">找到 ${matches.length} 条${matches.length > 60 ? "，显示前 60 条" : ""}</p>${
+          matches.length
+            ? `<div class="table-wrap"><table><tbody>${matches
+                .slice(0, 60)
+                .map(
+                  (w) =>
+                    `<tr><td><b>${esc(w.text)}</b><span class="sub">${esc(w.meaning)}</span></td><td>第 ${w.sectionId} 节 · ${w.index}</td><td>${button(icon("sound"), "speak-word", "text small", `data-text="${esc(w.text)}" aria-label="播放 ${esc(w.text)}"`)}</td><td>${button("练习本节", "section", "small", `data-id="${w.sectionId}"`)}</td></tr>`,
+                )
+                .join("")}</tbody></table></div>`
+            : '<div class="empty">没有找到匹配的词条。</div>'
+        }</div>`
+      : "";
+  }
+  if (el.id === "review-search") {
+    reviewSearch = el.value;
+    $("#review-table").innerHTML = reviewTable();
+  }
+});
+document.addEventListener("change", (e) => {
+  const el = e.target,
+    key = el.dataset.setting;
+  if (key) {
+    let value = el.type === "checkbox" ? el.checked : el.value;
+    if (["rate", "repeat", "interval", "dailyGoal"].includes(key))
+      value = Number(value);
+    if (
+      key === "dailyGoal" &&
+      (!Number.isInteger(value) || value < 1 || value > 1000)
+    ) {
+      el.value = state.settings.dailyGoal;
+      toast("每日目标应为 1–1000 的整数。");
+      return;
+    }
+    state.settings[key] = value;
+    persist();
+    if (key === "theme") render();
+  }
+  if (el.id === "review-sort") {
+    reviewSort = el.value;
+    $("#review-table").innerHTML = reviewTable();
+  }
+  if (el.id === "review-chapter") {
+    reviewChapter = el.value;
+    $("#review-table").innerHTML = reviewTable();
+  }
+  if (el.id === "history-section") {
+    historySection = el.value;
+    render();
+  }
+});
+document.addEventListener("focusin", (e) => {
+  if (e.target.dataset.answer !== undefined && session) {
+    activeIndex = Number(e.target.dataset.answer);
+    if (state.settings.autoPlay && !blockPlaying) {
+      stop();
+      speakRow(activeIndex);
+    }
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if (!session || $("#dialog").open) return;
+  if (e.key === "F2") {
+    e.preventDefault();
+    stop();
+    speakRow(activeIndex);
+  }
+  if (e.key === "Escape") stop();
+  if (
+    e.key === "Enter" &&
+    e.target.dataset.answer !== undefined &&
+    !e.isComposing
+  ) {
+    e.preventDefault();
+    const i = Number(e.target.dataset.answer);
+    if (i < session.words.length - 1) $(`#answer-${i + 1}`)?.focus();
+    else {
+      $('[data-action="finish"]')?.focus();
+      toast("已到最后一题，可以检查或提交听写。");
+    }
+  }
+});
+$("#dialog").addEventListener("close", () => speech.stop());
+window.addEventListener("beforeunload", () => {
+  saveDraft();
+  speech.stop();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    saveDraft();
+    stop();
+  }
+});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  if (state.settings.theme === "system")
+    document.body.dataset.theme = matchMedia("(prefers-color-scheme: dark)")
+      .matches
+      ? "dark"
+      : "light";
+});
+window.speechSynthesis?.addEventListener("voiceschanged", () => {
+  const el = $("#set-voiceURI");
+  if (el) {
+    const selected = state.settings.voiceURI;
+    el.innerHTML =
+      '<option value="">自动选择</option>' +
+      speech
+        .listVoices()
+        .map(
+          (v) =>
+            `<option value="${esc(v.voiceURI)}" ${selected === v.voiceURI ? "selected" : ""}>${esc(v.name)} (${esc(v.lang)})</option>`,
+        )
+        .join("");
+  }
+});
+render();
+if ("serviceWorker" in navigator)
+  navigator.serviceWorker.register("./sw.js").catch(() => {});

@@ -1,0 +1,7 @@
+{
+  "name": "ielts-wanglu-personal-dictation",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"test": "node --test tests/*.test.js", "check": "node --check app.js && node --check audio.js && node --check core.js", "build": "node scripts/build.mjs", "start": "python -m http.server 4173 --bind 127.0.0.1"}
+}
