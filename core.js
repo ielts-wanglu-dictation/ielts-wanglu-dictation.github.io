@@ -83,17 +83,65 @@ export function studyDateKey(value = new Date()) {
   return new Date(validDate(value).getTime() + 2 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
-export function updateReview(previous = {}, isCorrect, now = new Date()) {
+export function updateReview(previous = {}, isCorrect, now = new Date(), uncertain = false) {
   const date = validDate(now);
   const old = previous || {};
-  const streak = isCorrect ? Math.max(0, Number(old.streak) || 0) + 1 : 0;
-  const interval = isCorrect ? [0, 1, 3, 7, 14, 30, 60][Math.min(streak, 6)] : 0;
+  const confidentCorrect = isCorrect && !uncertain;
+  const streak = confidentCorrect ? Math.max(0, Number(old.streak) || 0) + 1 : 0;
+  const interval = confidentCorrect ? [0, 1, 3, 7, 14, 30, 60][Math.min(streak, 6)] : 0;
   const due = new Date(date);
   due.setDate(due.getDate() + interval);
   return {
     wrongCount: Math.max(0, Number(old.wrongCount) || 0) + (isCorrect ? 0 : 1),
     streak, interval, due: due.toISOString(), date: date.toISOString(),
+    uncertain: Boolean(uncertain || (!isCorrect && old.uncertain)),
+    uncertainCount: Math.max(0, Number(old.uncertainCount) || 0) + (uncertain ? 1 : 0),
   };
+}
+
+function sectionCoverage(history, section) {
+  const words = Array.isArray(section) ? section : section?.words || [];
+  const sectionId = Array.isArray(section) ? words[0]?.sectionId : section?.id;
+  const indexes = new Map(words.map((word, index) => [word.id, index]));
+  const completed = new Set();
+  let latest = null, latestDate = -Infinity;
+  for (const session of history || []) {
+    if (!session || !['normal', 'shuffle'].includes(session.mode)) continue;
+    const matched = (Array.isArray(session.results) ? session.results : [])
+      .filter(result => indexes.has(result?.wordId));
+    for (const result of matched) completed.add(indexes.get(result.wordId));
+    // Aggregate-only legacy records can suggest a batch size but never invent coverage.
+    if (!matched.length && (!sectionId || session.sectionId !== sectionId)) continue;
+    const timestamp = Date.parse(session.date);
+    const comparable = Number.isFinite(timestamp) ? timestamp : 0;
+    if (comparable >= latestDate) { latest = session; latestDate = comparable; }
+  }
+  const nextIndex = words.findIndex((_, index) => !completed.has(index));
+  const suggestedSize = words.length ? Math.min(words.length,
+    Number.isInteger(latest?.total) && latest.total > 0 ? latest.total : 50) : 0;
+  return { words, completed, progress: { completedCount: completed.size, total: words.length,
+    nextIndex: nextIndex < 0 ? null : nextIndex, suggestedSize,
+    lastMode: latest?.mode || 'normal', hasProgress: completed.size > 0 } };
+}
+
+/** Coverage is reconstructed from actual submitted answers; review retries never advance it. */
+export function getSectionProgress(history, section) {
+  return sectionCoverage(history, section).progress;
+}
+
+export function deriveSectionProgress(history, sectionWords) {
+  return getSectionProgress(history, sectionWords);
+}
+
+/** Plan the first unpractised contiguous range. A complete section never wraps implicitly. */
+export function nextSectionBatch(history, section, size = 50) {
+  integer(size, 1, 100000, '练习分组大小');
+  const { words, completed, progress } = sectionCoverage(history, section);
+  if (progress.nextIndex === null) return null;
+  const startIndex = progress.nextIndex;
+  let endIndex = startIndex;
+  while (endIndex < words.length && endIndex - startIndex < size && !completed.has(endIndex)) endIndex++;
+  return { startIndex, endIndex, words: words.slice(startIndex, endIndex), size: endIndex - startIndex };
 }
 
 export function computeStats(history = [], now = new Date()) {
@@ -192,13 +240,18 @@ function validateResult(raw, wordMap) {
   const wordId = text(raw.wordId, 2000);
   const word = wordMap.get(wordId);
   assert(typeof raw.ok === 'boolean', '答题记录缺少批改结果');
-  return {
+  const result = {
     wordId, text: text(raw.text ?? word?.text ?? ''),
     meaning: text(raw.meaning ?? word?.meaning ?? ''),
     phonetic: text(raw.phonetic ?? word?.phonetic ?? ''),
     typed: text(raw.typed ?? ''), ok: raw.ok,
     sectionId: text(raw.sectionId ?? word?.sectionId ?? '', 200),
   };
+  if (Object.hasOwn(raw, 'uncertain')) {
+    assert(typeof raw.uncertain === 'boolean', '答题模糊标记格式无效');
+    result.uncertain = raw.uncertain;
+  }
+  return result;
 }
 
 function validateSession(raw, wordMap) {
@@ -236,6 +289,11 @@ function validateDraft(raw, wordMap) {
     title: text(raw.title ?? '', 500), mode: raw.mode, wordIds, answers,
     activeIndex: integer(raw.activeIndex ?? 0, 0, wordIds.length - 1, '当前答题位置'),
     startedAt: iso(raw.startedAt), elapsed };
+  if (Object.hasOwn(raw, 'uncertain')) {
+    assert(Array.isArray(raw.uncertain) && raw.uncertain.length === wordIds.length
+      && raw.uncertain.every(value => typeof value === 'boolean'), '续练模糊标记格式或数量无效');
+    draft.uncertain = [...raw.uncertain];
+  }
   if (raw.words !== undefined) {
     assert(Array.isArray(raw.words) && raw.words.length === wordIds.length, '续练词条快照数量不一致');
     draft.words = raw.words.map((word, index) => {
@@ -277,6 +335,13 @@ export function validateBackup(input, words = corpus) {
       streak: integer(entry.streak ?? 0, 0, 10000000, '连续正确次数'),
       interval, due: iso(entry.due), date: iso(entry.date), lastTyped: text(entry.lastTyped ?? ''),
     };
+    if (Object.hasOwn(entry, 'uncertain')) {
+      assert(typeof entry.uncertain === 'boolean', '复习模糊标记格式无效');
+      state.reviews[id].uncertain = entry.uncertain;
+    }
+    if (Object.hasOwn(entry, 'uncertainCount')) {
+      state.reviews[id].uncertainCount = integer(entry.uncertainCount, 0, 10000000, '模糊次数');
+    }
   }
   state.draft = validateDraft(raw.draft, wordMap);
   return state;

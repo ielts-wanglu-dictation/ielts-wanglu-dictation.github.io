@@ -894,6 +894,43 @@ td .sub {
   margin: 0;
   gap: 8px;
 }
+.shortcut-help {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.shortcut-help kbd {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font: inherit;
+  color: var(--text);
+}
+.continuation-strip {
+  margin: 0 0 22px;
+  gap: 16px;
+  line-height: 1.8;
+}
+.continuation-strip > span { min-width: 0; }
+.continuation-strip .button { flex-shrink: 0; }
+.uncertain-chip {
+  background: #fff0cc;
+  color: #82550b;
+}
+.dict-row.uncertain-row { box-shadow: inset 3px 0 #dca444; }
+.dict-row .uncertain-toggle {
+  font-size: 11px;
+  min-height: 44px;
+  min-width: 46px;
+}
+.uncertain-toggle[aria-pressed="true"] {
+  background: #fff0cc;
+  color: #82550b;
+  border-color: #dca444;
+}
 .audio-status {
   min-height: 20px;
   margin-top: 8px;
@@ -911,7 +948,7 @@ td .sub {
 }
 .dict-row {
   display: grid;
-  grid-template-columns: 28px 36px minmax(0, 1fr);
+  grid-template-columns: 28px 36px minmax(0, 1fr) 46px;
   gap: 9px;
   align-items: center;
   padding: 13px 0;
@@ -930,7 +967,7 @@ td .sub {
   min-height: 44px;
 }
 .dict-row .answer-feedback {
-  grid-column: 3;
+  grid-column: 3 / -1;
   font-size: 12px;
   overflow-wrap: anywhere;
 }
@@ -1459,7 +1496,7 @@ dialog .dialog-actions {
     padding: 4px 12px;
   }
   .dict-row {
-    grid-template-columns: 23px 32px minmax(0, 1fr);
+    grid-template-columns: 23px 32px minmax(0, 1fr) 46px;
     gap: 7px;
   }
   .session-head h1 {
@@ -1511,6 +1548,8 @@ dialog .dialog-actions {
   .resume-strip {
     align-items: flex-start;
   }
+  .continuation-strip { flex-wrap: wrap; }
+  .continuation-strip .button { margin-left: auto; }
   .section-detail-grid .form-row {
     grid-template-columns: 1fr 1fr;
   }

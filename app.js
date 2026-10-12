@@ -7,6 +7,8 @@ import {
   computeStats,
   createInitialState,
   parseBackup,
+  getSectionProgress,
+  nextSectionBatch,
 } from "./core.js";
 import { SpeechPlayer } from "./audio.js";
 import { BackupClient } from "./backup.js";
@@ -55,7 +57,7 @@ const icon = (n) =>
 const button = (label, action, cls = "", attrs = "") =>
   `<button class="button ${cls}" data-action="${action}" ${attrs}>${label}</button>`;
 const modeLabel = (m) =>
-  ({ normal: "顺序听写", shuffle: "乱序测试", review: "错词复习" })[m] ||
+  ({ normal: "顺序听写", shuffle: "乱序测试", review: "专项复习" })[m] ||
   "听写";
 const dateText = (d) =>
   new Date(d).toLocaleString("zh-CN", {
@@ -92,6 +94,7 @@ let page = "home",
   rowPlayToken = 0,
   blockPlaying = false,
   activeIndex = 0,
+  suppressFocusAudio = false,
   startedSegment = 0,
   toastTimer;
 const speech = new SpeechPlayer((message, detail) => {
@@ -167,17 +170,14 @@ function wordsForDraft(d) {
 function reviewWords(filter = reviewFilter) {
   const now = Date.now();
   return Object.values(state.reviews)
-    .filter((r) => r.wrongCount > 0)
-    .filter(
-      (r) =>
-        filter === "all" ||
-        (filter === "due"
-          ? new Date(r.due).getTime() <= now
-          : filter === "active"
-            ? r.streak < 3
-            : r.streak >= 3),
-    )
-    .map((r) => ({ ...r, id: r.wordId, ...wordById.get(r.wordId) }));
+    .filter(r => r.wrongCount > 0 || r.uncertain || r.uncertainCount > 0)
+    .filter(r => filter === "all"
+      || (filter === "wrong" && r.wrongCount > 0)
+      || (filter === "uncertain" && r.uncertain)
+      || (filter === "due" && new Date(r.due).getTime() <= now)
+      || (filter === "active" && r.streak < 3)
+      || (filter === "mastered" && r.streak >= 3 && !r.uncertain))
+    .map(r => ({ ...r, id: r.wordId, ...wordById.get(r.wordId) }));
 }
 function dueCount() {
   return reviewWords("due").length;
@@ -189,7 +189,7 @@ function shell(content) {
   const navs = [
     ["home", "home", "学习概览"],
     ["library", "book", "语料练习"],
-    ["review", "review", "我的错词"],
+    ["review", "review", "错词与模糊"],
     ["history", "chart", "学习记录"],
     ["settings", "settings", "设置与备份"],
   ];
@@ -215,8 +215,9 @@ function sectionCards(limit) {
     .map((s) => {
       const hs = sectionHistory(s.id),
         last = hs.at(-1),
-        done = new Set(hs.flatMap((h) => h.results.map((r) => r.wordId))).size;
-      return `<article class="chapter-card"><div class="card-top"><div class="book-icon">${icon("book")}</div><span class="chip ${last ? "green" : ""}">${last ? Math.round((last.correct / last.total) * 100) + "% 正确" : "待开始"}</span></div><h3>第 ${esc(s.id)} 节 · ${s.chapterId === "5" || s.chapterId === "11" ? "短语听写" : "词汇听写"}</h3><p>${s.words.length} 个词条 · ${hs.length ? hs.length + " 次练习" : "开启你的第一遍练习"}</p><div class="progress-track"><span style="width:${Math.min(100, (done / s.words.length) * 100)}%"></span></div><div class="card-bottom"><span>已练 ${Math.min(done, s.words.length)} / ${s.words.length} 词</span>${button("开始练习 " + icon("arrow"), "section", "small text", `data-id="${esc(s.id)}"`)}</div></article>`;
+        progress = getSectionProgress(state.history, s),
+        done = progress.completedCount;
+      return `<article class="chapter-card"><div class="card-top"><div class="book-icon">${icon("book")}</div><span class="chip ${last ? "green" : ""}">${last ? Math.round((last.correct / last.total) * 100) + "% 正确" : "待开始"}</span></div><h3>第 ${esc(s.id)} 节 · ${s.chapterId === "5" || s.chapterId === "11" ? "短语听写" : "词汇听写"}</h3><p>${s.words.length} 个词条 · ${hs.length ? hs.length + " 次练习" : "开启你的第一遍练习"}</p><div class="progress-track"><span style="width:${Math.min(100, (done / s.words.length) * 100)}%"></span></div><div class="card-bottom"><span>已练 ${Math.min(done, s.words.length)} / ${s.words.length} 词</span>${progress.hasProgress && progress.nextIndex !== null ? button("设置", "section", "small text", `data-id="${esc(s.id)}"`) : ""}${button((progress.hasProgress && progress.nextIndex !== null ? "继续练习 " : "开始练习 ") + icon("arrow"), progress.hasProgress && progress.nextIndex !== null ? "continue-section" : "section", "small text", `data-id="${esc(s.id)}"`)}</div></article>`;
     })
     .join("")}</div>`;
 }
@@ -237,6 +238,10 @@ function home() {
   const s = computeStats(state.history),
     goal = state.settings.dailyGoal || 50,
     progress = Math.min(100, (s.todayCount / goal) * 100);
+  const recentSection = [...state.history].reverse()
+    .filter(h => h.mode !== 'review')
+    .map(h => sections.find(section => section.id === h.sectionId))
+    .find(section => section && getSectionProgress(state.history, section).nextIndex !== null);
   return (
     heading(
       "A LITTLE PRACTICE, EVERY DAY",
@@ -244,7 +249,7 @@ function home() {
       "从一个单词开始，让每一次练习都有迹可循。",
       `<span class="date-pill">${studyDateKey()} 学习日 · 北京时间 06:00 换日</span>`,
     ) +
-    `${state.draft ? `<div class="resume-strip"><span>${icon("save")} 上次练习已保存：${esc(state.draft.title)} · 已填写 ${state.draft.answers.filter(Boolean).length} / ${state.draft.wordIds.length}</span>${button("继续听写 " + icon("arrow"), "resume", "small")}</div>` : ""}<div class="hero-grid"><section class="hero"><div class="hero-copy"><span class="tag">YOUR DAILY LISTENING RITUAL</span><h2>让熟悉的单词，<br>成为听力里的确定感。</h2><p>完整王陆语料库，自选节奏，专注听写。<br>今天的进步，就从下一次播放开始。</p>${button(icon("play") + " 开始今日练习", "daily", "primary")}${button("浏览语料", "library-link", "text")}</div><div class="wave-art" aria-hidden="true">${"<i></i>".repeat(9)}</div></section><section class="panel goal-panel"><div class="panel-top"><h3>今日学习目标</h3>${button("调整目标", "goal", "text small")}</div><div class="goal-body"><div class="goal-ring" style="--progress:${progress}%"><div><strong>${s.todayCount}</strong><span>/ ${goal} 个词</span></div></div><div class="goal-info"><b>${progress >= 100 ? "今日目标已完成" : "给专注留一点时间"}</b><p>${progress >= 100 ? "做得不错，明天继续。" : `再练 ${Math.max(0, goal - s.todayCount)} 个，完成今日目标`}</p><span class="mini">${icon("check")} 每一步都在积累</span></div></div></section></div>` +
+    `${state.draft ? `<div class="resume-strip"><span>${icon("save")} 上次练习已保存：${esc(state.draft.title)} · 已填写 ${state.draft.answers.filter(Boolean).length} / ${state.draft.wordIds.length}</span>${button("继续听写 " + icon("arrow"), "resume", "small")}</div>` : recentSection ? continuationPanel(recentSection, true) : ""}<div class="hero-grid"><section class="hero"><div class="hero-copy"><span class="tag">YOUR DAILY LISTENING RITUAL</span><h2>让熟悉的单词，<br>成为听力里的确定感。</h2><p>完整王陆语料库，自选节奏，专注听写。<br>今天的进步，就从下一次播放开始。</p>${button(icon("play") + " 开始今日练习", "daily", "primary")}${button("浏览语料", "library-link", "text")}</div><div class="wave-art" aria-hidden="true">${"<i></i>".repeat(9)}</div></section><section class="panel goal-panel"><div class="panel-top"><h3>今日学习目标</h3>${button("调整目标", "goal", "text small")}</div><div class="goal-body"><div class="goal-ring" style="--progress:${progress}%"><div><strong>${s.todayCount}</strong><span>/ ${goal} 个词</span></div></div><div class="goal-info"><b>${progress >= 100 ? "今日目标已完成" : "给专注留一点时间"}</b><p>${progress >= 100 ? "做得不错，明天继续。" : `再练 ${Math.max(0, goal - s.todayCount)} 个，完成今日目标`}</p><span class="mini">${icon("check")} 每一步都在积累</span></div></div></section></div>` +
     metrics([
       ["book", s.totalWords || 0, "词", "累计听写"],
       ["flame", s.streak || 0, "天", "连续练习"],
@@ -254,9 +259,9 @@ function home() {
         s.totalWords ? "%" : "",
         "整体正确率",
       ],
-      ["review", dueCount(), "词", "待复习错词"],
+      ["review", dueCount(), "词", "待复习词条"],
     ]) +
-    `<section><div class="section-header"><div><h2>回到语料，继续积累</h2><p>4 个章节 · 32 个小节 · 5,873 个词条</p></div>${chapterTabs()}</div>${sectionCards(6)}<div style="text-align:center;margin-top:14px">${button("查看全部语料 " + icon("arrow"), "library-link", "text")}</div></section><div class="lower-grid"><section class="panel"><div class="section-header"><h2>最近的练习</h2>${button("全部记录 " + icon("arrow"), "history-link", "text small")}</div>${recentTable(state.history.slice(-3), true)}</section><section class="panel tip-card"><div class="eyebrow">A SMALL REMINDER</div>${icon("info")}<h3>比一遍全对更重要的，<br>是把错词再听一遍。</h3><p>答错的词会自动加入错词本。复习答对后，按 1、3、7、14 天逐步延长间隔，让记忆慢慢稳下来。</p>${button("去复习 " + icon("arrow"), "review-link", "text small")}</section></div>`
+    `<section><div class="section-header"><div><h2>回到语料，继续积累</h2><p>4 个章节 · 32 个小节 · 5,873 个词条</p></div>${chapterTabs()}</div>${sectionCards(6)}<div style="text-align:center;margin-top:14px">${button("查看全部语料 " + icon("arrow"), "library-link", "text")}</div></section><div class="lower-grid"><section class="panel"><div class="section-header"><h2>最近的练习</h2>${button("全部记录 " + icon("arrow"), "history-link", "text small")}</div>${recentTable(state.history.slice(-3), true)}</section><section class="panel tip-card"><div class="eyebrow">A SMALL REMINDER</div>${icon("info")}<h3>比一遍全对更重要的，<br>是把错词再听一遍。</h3><p>答错或标记“模糊”的词都会进入复习。模糊不计作错误；清晰答对后，逐步延长复习间隔。</p>${button("去复习 " + icon("arrow"), "review-link", "text small")}</section></div>`
   );
 }
 function library() {
@@ -279,6 +284,24 @@ function chart(history) {
   ]);
   return `<svg class="chart" viewBox="0 0 530 180" role="img" aria-label="最近 ${data.length} 次练习正确率趋势">${[0, 50, 100].map((n) => `<line x1="40" y1="${148 - n * 1.2}" x2="505" y2="${148 - n * 1.2}" stroke="var(--line)"/><text x="4" y="${152 - n * 1.2}">${n}%</text>`).join("")}<polyline points="${points.map((p) => p.join(",")).join(" ")}" fill="none" stroke="currentColor" stroke-width="2.5"/>${points.map(([x, y], i) => `<circle cx="${x}" cy="${y}" r="4" fill="currentColor"><title>${dateText(data[i].date)}：${Math.round((data[i].correct / data[i].total) * 100)}%</title></circle>`).join("")}<text x="40" y="174">${dateText(data[0].date)}</text><text x="505" y="174" text-anchor="end">${dateText(data.at(-1).date)}</text></svg>`;
 }
+
+function continuationPanel(section, compact = false) {
+  const progress = getSectionProgress(state.history, section);
+  if (!progress.hasProgress) return '';
+  const batch = nextSectionBatch(state.history, section, progress.suggestedSize);
+  if (batch) return `<div class="resume-strip continuation-strip"><span>${icon('arrow')}<strong>接着上一组 · 第 ${esc(section.id)} 节</strong><br>已练 ${progress.completedCount} / ${progress.total} 词 · 下一组第 ${batch.startIndex + 1}–${batch.endIndex} 词${compact ? '' : progress.lastMode === 'shuffle' ? ' · 保留乱序模式，已完成的词不会重复' : ' · 按原词序接着练，已完成的词不会重复'}</span>${button('继续练习 ' + icon('play'), 'continue-section', 'primary small', `data-id="${esc(section.id)}"`)}</div>`;
+  const next = sections[sections.findIndex(s => s.id === section.id) + 1];
+  return `<div class="resume-strip continuation-strip"><span>${icon('check')}<strong>本节已练完 · ${progress.total} / ${progress.total} 词</strong><br>可以复习错词与模糊词，或继续下一小节。</span>${next ? button('下一小节 · ' + esc(next.id), 'continue-section', 'primary small', `data-id="${esc(next.id)}"`) : button('浏览全部语料', 'library-link', 'small')}</div>`;
+}
+function continueSection(id) {
+  const section = sections.find(s => s.id === id);
+  if (!section) return;
+  const progress = getSectionProgress(state.history, section);
+  const batch = nextSectionBatch(state.history, section, progress.suggestedSize);
+  if (!batch) { openSection(id); return; }
+  begin(batch.words, `第 ${id} 节 · ${batch.startIndex + 1}–${batch.endIndex} 词`, id, progress.lastMode || 'normal');
+}
+
 function sectionPage() {
   const s = sections.find((x) => x.id === currentSection),
     hs = sectionHistory(s.id),
@@ -289,6 +312,9 @@ function sectionPage() {
     avg = hs.length
       ? hs.reduce((a, h) => a + (h.correct / h.total) * 100, 0) / hs.length
       : 0;
+  const progress = getSectionProgress(state.history, s);
+  const start = progress.nextIndex === null ? 1 : progress.nextIndex + 1;
+  const size = progress.suggestedSize;
   return (
     heading(
       "ONE SECTION AT A TIME",
@@ -296,6 +322,7 @@ function sectionPage() {
       `${s.words.length} 个词条 · ${hs.length} 次练习`,
       button(icon("back") + " 返回语料", "library-link"),
     ) +
+    continuationPanel(s) +
     metrics([
       [
         "target",
@@ -317,7 +344,7 @@ function sectionPage() {
       ],
       ["book", hs.length, "次", "本节练习"],
     ]) +
-    `<div class="section-detail-grid"><section class="panel"><h2>设置这次练习</h2><p class="muted">按原始语料顺序，选择适合今天的练习量。</p><div class="field"><label for="batch-size">练习数量</label><select id="batch-size"><option value="20">轻量一组 · 20 词</option><option value="50" selected>标准一组 · 50 词</option><option value="100">集中练习 · 100 词</option><option value="all">本节全部 · ${s.words.length} 词</option><option value="range">自选词序范围</option></select></div><div class="form-row"><div class="field"><label for="range-start">起始词序</label><input id="range-start" type="number" min="1" max="${s.words.length}" value="1"></div><div class="field"><label for="range-end">结束词序（自选范围时）</label><input id="range-end" type="number" min="1" max="${s.words.length}" value="${Math.min(50, s.words.length)}"></div></div><div class="flex" style="margin-top:24px">${button(icon("play") + " 开始听写", "start-section", "primary")}${button(icon("shuffle") + " 乱序测试", "start-shuffle")}</div><p class="muted" style="font-size:11px;margin-top:12px">乱序仅打乱本次选定范围；Enter 下一题，F2 重听。</p></section><section class="panel"><h2>正确率趋势</h2><p class="muted">最近 20 次练习</p>${chart(hs)}${hs.length > 1 ? `<p class="muted">较上次：${Math.round((last.correct / last.total) * 100 - (hs.at(-2).correct / hs.at(-2).total) * 100)} 个百分点</p>` : ""}</section></div><section style="margin-top:26px"><div class="section-header"><h2>本节练习记录</h2>${button("查看本节词表", "preview-words", "small")}</div>${recentTable(hs)}</section>`
+    `<div class="section-detail-grid"><section class="panel"><h2>设置这次练习</h2><p class="muted">按原始语料顺序，选择适合今天的练习量。</p><div class="field"><label for="batch-size">练习数量</label><select id="batch-size">${[...new Set([20, 50, 100, size])].sort((a,b)=>a-b).map(n=>`<option value="${n}" ${n===size?"selected":""}>${n===20?"轻量一组":n===50?"标准一组":n===100?"集中练习":"上次分组"} · ${n} 词</option>`).join("")}<option value="all">本节全部 · ${s.words.length} 词</option><option value="range">自选词序范围</option></select></div><div class="form-row"><div class="field"><label for="range-start">起始词序</label><input id="range-start" type="number" min="1" max="${s.words.length}" value="${start}"></div><div class="field"><label for="range-end">结束词序（自选范围时）</label><input id="range-end" type="number" min="1" max="${s.words.length}" value="${Math.min(start + size - 1, s.words.length)}"></div></div><div class="flex" style="margin-top:24px">${button(icon("play") + " 开始听写", "start-section", "primary")}${button(icon("shuffle") + " 乱序测试", "start-shuffle")}</div><p class="muted" style="font-size:11px;margin-top:12px">乱序仅打乱本次选定范围；Enter 下一题并播放，F2 重听，F4 标记模糊。</p></section><section class="panel"><h2>正确率趋势</h2><p class="muted">最近 20 次练习</p>${chart(hs)}${hs.length > 1 ? `<p class="muted">较上次：${Math.round((last.correct / last.total) * 100 - (hs.at(-2).correct / hs.at(-2).total) * 100)} 个百分点</p>` : ""}</section></div><section style="margin-top:26px"><div class="section-header"><h2>本节练习记录</h2>${button("查看本节词表", "preview-words", "small")}</div>${recentTable(hs)}</section>`
   );
 }
 function begin(words, title, sectionId, mode = "normal", force = false) {
@@ -359,6 +386,7 @@ function begin(words, title, sectionId, mode = "normal", force = false) {
     wordIds: ordered.map((w) => w.id),
     words: ordered,
     answers: ordered.map(() => ""),
+    uncertain: ordered.map(() => false),
     activeIndex: 0,
     startedAt: new Date().toISOString(),
     elapsed: 0,
@@ -370,7 +398,7 @@ function begin(words, title, sectionId, mode = "normal", force = false) {
   page = "practice";
   render();
   window.scrollTo(0, 0);
-  $("#answer-0")?.focus();
+  focusAnswer(0, { play: true });
 }
 function shuffle(words) {
   const a = [...words];
@@ -391,16 +419,32 @@ function resume() {
     ...d,
     words,
     answers: words.map((_, i) => String(d.answers[i] || "")),
+    uncertain: words.map((_, i) => Boolean(d.uncertain?.[i])),
   };
   activeIndex = Math.max(0, Math.min(words.length - 1, d.activeIndex || 0));
   startedSegment = Date.now();
   page = "practice";
   alignment = [];
   render();
-  $(`#answer-${activeIndex}`)?.focus();
+  focusAnswer(activeIndex, { play: true });
 }
 function practicePage() {
-  return `<div class="session-head"><div><div class="eyebrow">LISTEN. TYPE. REPEAT.</div><h1>${esc(session.title)}</h1><p>${modeLabel(session.mode)} · ${session.words.length} 词 · <span id="answered-count">${session.answers.filter((a) => a.trim()).length}</span> 已填写 · 草稿自动保存</p></div>${button(icon("save") + " 保存并退出", "save-exit")}</div><div class="practice-toolbar"><div class="toolbar">${button(icon("sound") + " 重听当前词", "replay", "primary")}${button(icon("play") + " 连播", "block")}${button("自动发音：" + (state.settings.autoPlay ? "开" : "关"), "auto", state.settings.autoPlay ? "soft" : "")}${button(icon("settings") + " 发音设置", "audio-settings")}<span class="muted" style="font-size:10px;margin-left:auto"><kbd class="keyboard">F2</kbd> 重听 · <kbd class="keyboard">Enter</kbd> 下一题</span></div><div id="audio-status" class="audio-status" aria-live="polite">点击喇叭开始听写。词典与在线备用发音需要联网。</div></div><div class="flex space" style="margin:14px 0"><span class="muted" style="font-size:11px">答案填错行？先选中需要调整的输入框。</span><div class="flex">${button("插入空行 ↓", "align-down", "small")}${button("答案上移 ↑", "align-up", "small")}${button("撤销调整", "align-undo", "small")}</div></div><div class="practice-list">${session.words.map((w, i) => `<div class="dict-row" id="row-${i}"><span class="num">${i + 1}</span>${button(icon("sound"), "speak", "text", `data-index="${i}" aria-label="播放第 ${i + 1} 词"`)}<label class="sr-only" for="answer-${i}">第 ${i + 1} 题答案</label><input id="answer-${i}" data-answer="${i}" value="${esc(session.answers[i])}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="听音后输入…" enterkeyhint="next"><div class="answer-feedback" hidden></div></div>`).join("")}</div><div class="practice-end"><span>支持常见英美拼写；忽略大小写和首尾空格。<br>「检查答案」不写入历史；提交后才记录本次成绩。</span><div class="flex">${button("检查答案", "check")}${button("提交听写 " + icon("check"), "finish", "primary")}</div></div>`;
+  return `<div class="session-head"><div><div class="eyebrow">LISTEN. TYPE. REPEAT.</div><h1>${esc(session.title)}</h1><p>${modeLabel(session.mode)} · ${session.words.length} 词 · <span id="answered-count">${session.answers.filter(a => a.trim()).length}</span> 已填写 · <span id="uncertain-count">${session.uncertain.filter(Boolean).length}</span> 模糊 · 草稿自动保存</p></div>${button(icon('save') + ' 保存并退出', 'save-exit')}</div>
+  <div class="practice-toolbar"><div class="toolbar">${button(icon('sound') + ' 重听当前词', 'replay', 'primary')}${button(icon('play') + ' 连播', 'block')}${button('聚焦播放：' + (state.settings.autoPlay ? '开' : '关'), 'auto', state.settings.autoPlay ? 'soft' : '')}${button(icon('settings') + ' 发音设置', 'audio-settings')}</div>
+  <div class="shortcut-help"><span><kbd>Enter</kbd> 下一题并播放</span><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 上一题</span><span><kbd>F2</kbd> / <kbd>Alt</kbd> + <kbd>R</kbd> 重听</span><span><kbd>F4</kbd> 模糊标记</span><span><kbd>Esc</kbd> 停止</span></div>
+  <div id="audio-status" class="audio-status" aria-live="polite">Enter 自动播放下一词；“聚焦播放”控制鼠标或 Tab 进入答案框时是否播放。</div></div>
+  <div class="flex space" style="margin:14px 0"><span class="muted" style="font-size:11px">答案填错行？先选中需要调整的输入框。模糊标记跟随词条保存。</span><div class="flex">${button('插入空行 ↓', 'align-down', 'small')}${button('答案上移 ↑', 'align-up', 'small')}${button('撤销调整', 'align-undo', 'small')}</div></div>
+  <div class="practice-list">${session.words.map((w,i) => `<div class="dict-row ${session.uncertain[i] ? 'uncertain-row' : ''}" id="row-${i}"><span class="num">${i + 1}</span>${button(icon('sound'), 'speak', 'text', `data-index="${i}" aria-label="播放第 ${i + 1} 词"`)}<label class="sr-only" for="answer-${i}">第 ${i + 1} 题答案</label><input id="answer-${i}" data-answer="${i}" value="${esc(session.answers[i])}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="听音后输入…" enterkeyhint="${i === session.words.length - 1 ? 'done' : 'next'}">${button('模糊', 'toggle-uncertain', 'uncertain-toggle', `data-index="${i}" aria-label="标记第 ${i + 1} 词为模糊" aria-pressed="${session.uncertain[i]}" title="不确定就标记，答对也会加入复习（F4）"`)}<div class="answer-feedback" hidden></div></div>`).join('')}</div>
+  <div class="practice-end"><span>支持常见英美拼写；忽略大小写和首尾空格。<br>模糊与对错独立记录；「检查答案」不写入历史，提交后才计入统计。</span><div class="flex">${button('检查答案', 'check')}${button('提交听写 ' + icon('check'), 'finish', 'primary')}</div></div>`;
+}
+function toggleUncertain(index = activeIndex) {
+  if (!session || !session.words[index]) return;
+  session.uncertain[index] = !session.uncertain[index];
+  const row = $(`#row-${index}`), marked = session.uncertain[index];
+  row?.classList.toggle('uncertain-row', marked);
+  row?.querySelector('[data-action="toggle-uncertain"]')?.setAttribute('aria-pressed', String(marked));
+  $('#uncertain-count').textContent = session.uncertain.filter(Boolean).length;
+  focusAnswer(index);
 }
 function getResults() {
   return session.words.map((w, i) => ({
@@ -411,6 +455,7 @@ function getResults() {
     sectionId: w.sectionId,
     typed: session.answers[i] || "",
     ok: gradeAnswer(session.answers[i] || "", w.text),
+    uncertain: Boolean(session.uncertain[i]),
   }));
 }
 function check() {
@@ -464,11 +509,11 @@ function finish(confirmed = false) {
     state.history.push(h);
     for (const r of results) {
       const old = state.reviews[r.wordId];
-      if (!r.ok || old)
+      if (!r.ok || r.uncertain || old)
         state.reviews[r.wordId] = {
           ...old,
           ...r,
-          ...updateReview(old, r.ok),
+          ...updateReview(old, r.ok, new Date(h.date), r.uncertain),
           lastTyped: r.typed,
         };
     }
@@ -488,31 +533,36 @@ function resultList(results) {
     return (
       '<div class="empty">' +
       icon("check") +
-      "<p>这一组全部答对了，继续保持。</p></div>"
+      "<p>当前筛选下没有词条，可以切换查看全部。</p></div>"
     );
-  return `<div class="panel" style="padding:0">${results.map((r) => `<div class="result-row"><span class="${r.ok ? "good-text" : "bad-text"}">${r.ok ? "✓" : "×"}</span><div><span class="word">${esc(r.text)}</span><div class="meaning">${esc(r.phonetic)} ${esc(r.meaning)}</div></div><div class="${r.ok ? "correct" : "answer"}">${esc(r.typed || "（未填写）")}</div>${button(icon("sound"), "speak-word", "text", `data-text="${esc(r.text)}" aria-label="播放 ${esc(r.text)}"`)}</div>`).join("")}</div>`;
+  return `<div class="panel" style="padding:0">${results.map((r) => `<div class="result-row"><span class="${r.ok ? "good-text" : "bad-text"}">${r.ok ? "✓" : "×"}</span><div><span class="word">${esc(r.text)}</span>${r.uncertain ? ' <span class="chip uncertain-chip">模糊</span>' : ""}<div class="meaning">${esc(r.phonetic)} ${esc(r.meaning)}</div></div><div class="${r.ok ? "correct" : "answer"}">${esc(r.typed || "（未填写）")}</div>${button(icon("sound"), "speak-word", "text", `data-text="${esc(r.text)}" aria-label="播放 ${esc(r.text)}"`)}</div>`).join("")}</div>`;
 }
 function resultPage() {
   const h = lastResult;
+  const section = sections.find(s => s.id === h.sectionId);
+  const uncertainCount = h.results.filter(r => r.uncertain).length;
   return (
     heading(
       "EVERY TRY COUNTS",
       "这一遍，完成了。",
       `${esc(h.title || h.sectionId)} · ${modeLabel(h.mode)} · ${dateText(h.date)}`,
     ) +
-    `<section class="panel results-hero"><div><div class="score">${Math.round((h.correct / h.total) * 100)}<small>%</small></div><span class="muted">本次正确率</span></div><div><h2>${h.correct === h.total ? "全部答对，记得按时复习。" : "找到错词，就是进步的开始。"}</h2><p class="muted">答对 ${h.correct} / ${h.total} 词 · 用时 ${Math.floor((h.duration || 0) / 60)} 分 ${(h.duration || 0) % 60} 秒</p><div class="flex">${button(icon("review") + " 重练本次错词", "retry-wrong", "primary", h.results.some((r) => !r.ok) ? "" : "disabled")}${button(h.results.length < h.total ? "重练已有词条" : "再练一次", "retry", "", h.results.length ? "" : "disabled")}${button(icon("shuffle") + " 乱序重练", "retry-shuffle", "", h.results.length ? "" : "disabled")}</div></div></section><div class="section-header"><h2>逐词批改</h2><div class="tabs"><button data-result-filter="wrong" class="${resultFilter === "wrong" ? "active" : ""}">错词 ${h.results.filter((r) => !r.ok).length}</button><button data-result-filter="all" class="${resultFilter === "all" ? "active" : ""}">全部 ${h.results.length}</button></div></div>${h.results.length < h.total ? '<div class="notice">旧版备份只保留了部分答题明细。总成绩仍按原记录显示，下方仅列出已有词条；重练也仅包含这些词条。</div>' : ""}${h.results.length ? resultList(h.results.filter((r) => resultFilter === "all" || !r.ok)) : '<div class="empty">这是一条旧版汇总记录，没有逐词详情。</div>'}`
+    (section ? continuationPanel(section) : "") +
+    `<section class="panel results-hero"><div><div class="score">${Math.round((h.correct / h.total) * 100)}<small>%</small></div><span class="muted">本次正确率</span></div><div><h2>${h.correct === h.total ? "全部答对，记得按时复习。" : "找到错词，就是进步的开始。"}</h2><p class="muted">答对 ${h.correct} / ${h.total} 词 · 模糊 ${uncertainCount} 词 · 用时 ${Math.floor((h.duration || 0) / 60)} 分 ${(h.duration || 0) % 60} 秒</p><div class="flex">${button("重练本次模糊词", "retry-uncertain", "soft", uncertainCount ? "" : "disabled")}${button(icon("review") + " 重练本次错词", "retry-wrong", "", h.results.some((r) => !r.ok) ? "" : "disabled")}${button(h.results.length < h.total ? "重练已有词条" : "再练一次", "retry", "", h.results.length ? "" : "disabled")}${button(icon("shuffle") + " 乱序重练", "retry-shuffle", "", h.results.length ? "" : "disabled")}</div></div></section><div class="section-header"><h2>逐词批改</h2><div class="tabs"><button data-result-filter="wrong" class="${resultFilter === "wrong" ? "active" : ""}">错词 ${h.results.filter((r) => !r.ok).length}</button><button data-result-filter="uncertain" class="${resultFilter === "uncertain" ? "active" : ""}">模糊 ${uncertainCount}</button><button data-result-filter="all" class="${resultFilter === "all" ? "active" : ""}">全部 ${h.results.length}</button></div></div>${h.results.length < h.total ? '<div class="notice">旧版备份只保留了部分答题明细。总成绩仍按原记录显示，下方仅列出已有词条；重练也仅包含这些词条。</div>' : ""}${h.results.length ? resultList(h.results.filter(r => resultFilter === "all" || (resultFilter === "uncertain" ? r.uncertain : !r.ok))) : '<div class="empty">这是一条旧版汇总记录，没有逐词详情。</div>'}`
   );
 }
 function reviewPage() {
   return (
     heading(
       "MAKE THE WORDS STICK",
-      "错过的词，再听一遍。",
-      "复习会更新记忆间隔，历史错误次数保留；连续答对 3 次标记为已掌握。",
-      button(icon("download") + " 导出错词 CSV", "export-words"),
+      "错词与模糊词，再听一遍。",
+      "答对但模糊的词也会进入复习，不增加错误次数；连续清晰答对 3 次标记为已掌握。",
+      button(icon("download") + " 导出复习 CSV", "export-words"),
     ) +
     `<div class="section-header"><div class="tabs">${[
-      ["all", "全部错词"],
+      ["all", "全部词条"],
+      ["wrong", "有过错误"],
+      ["uncertain", "模糊词"],
       ["due", "到期复习"],
       ["active", "巩固中"],
       ["mastered", "已掌握"],
@@ -523,7 +573,7 @@ function reviewPage() {
       )
       .join(
         "",
-      )}</div><div class="flex">${button(icon("play") + " 练习当前筛选", "review-selected", "primary")}${button("复习今日到期词", "review-due")}</div></div><div class="toolbar"><label class="sr-only" for="review-search">搜索错词</label><input id="review-search" type="search" value="${esc(reviewSearch)}" placeholder="搜索错词或释义…"><label class="sr-only" for="review-chapter">错词小节</label><select id="review-chapter"><option value="">全部小节</option>${sections.map((s) => `<option value="${s.id}" ${reviewChapter === s.id ? "selected" : ""}>第 ${s.id} 节</option>`).join("")}</select><label class="sr-only" for="review-sort">错词排序</label><select id="review-sort"><option value="count" ${reviewSort === "count" ? "selected" : ""}>错误次数最多</option><option value="date" ${reviewSort === "date" ? "selected" : ""}>最近练习优先</option><option value="chapter" ${reviewSort === "chapter" ? "selected" : ""}>按小节分组</option></select></div><div id="review-table">${reviewTable()}</div>`
+      )}</div><div class="flex">${button(icon("play") + " 练习当前筛选", "review-selected", "primary")}${button("复习今日到期词", "review-due")}</div></div><div class="toolbar"><label class="sr-only" for="review-search">搜索错词</label><input id="review-search" type="search" value="${esc(reviewSearch)}" placeholder="搜索错词或释义…"><label class="sr-only" for="review-chapter">错词小节</label><select id="review-chapter"><option value="">全部小节</option>${sections.map((s) => `<option value="${s.id}" ${reviewChapter === s.id ? "selected" : ""}>第 ${s.id} 节</option>`).join("")}</select><label class="sr-only" for="review-sort">错词排序</label><select id="review-sort"><option value="count" ${reviewSort === "count" ? "selected" : ""}>错误次数最多</option><option value="uncertain" ${reviewSort === "uncertain" ? "selected" : ""}>模糊次数最多</option><option value="date" ${reviewSort === "date" ? "selected" : ""}>最近练习优先</option><option value="chapter" ${reviewSort === "chapter" ? "selected" : ""}>按小节分组</option></select></div><div id="review-table">${reviewTable()}</div>`
   );
 }
 function filteredReviews() {
@@ -535,7 +585,9 @@ function filteredReviews() {
         (!q || `${w.text} ${w.meaning}`.toLowerCase().includes(q)),
     )
     .sort((a, b) =>
-      reviewSort === "date"
+      reviewSort === "uncertain"
+        ? (b.uncertainCount || 0) - (a.uncertainCount || 0)
+        : reviewSort === "date"
         ? new Date(b.date) - new Date(a.date)
         : reviewSort === "chapter"
           ? String(a.sectionId).localeCompare(String(b.sectionId), undefined, {
@@ -547,8 +599,8 @@ function filteredReviews() {
 function reviewTable() {
   const words = filteredReviews();
   if (!words.length)
-    return `<section class="panel empty">${icon("review")}<p>${Object.keys(state.reviews).length ? "这个筛选下没有错词。" : "错词本还是空的，开始一次练习吧。"}</p>${button("去语料库练习", "library-link", "soft")}</section>`;
-  return `<div class="muted" style="font-size:11px;margin-bottom:10px">当前 ${words.length} 词 · 点击小节可打开练习设置</div><div class="table-wrap"><table><thead><tr><th>单词 / 短语</th><th>上次填写</th><th>小节</th><th>错误次数</th><th>复习状态</th><th>发音</th></tr></thead><tbody>${words.map((w) => `<tr><td><span class="word">${esc(w.text)}</span><span class="sub">${esc(w.phonetic)} ${esc(w.meaning)}</span></td><td class="bad-text">${esc(w.lastTyped || "—")}</td><td>${button(esc(w.sectionId || "旧版"), "section", "text small", `data-id="${esc(w.sectionId)}"`)}</td><td>${w.wrongCount}</td><td><span class="chip ${w.streak >= 3 ? "green" : new Date(w.due) <= new Date() ? "red" : "purple"}">${new Date(w.due) <= new Date() ? "待复习" : w.streak >= 3 ? "已掌握" : "巩固中"}</span><span class="sub">${new Date(w.due).toLocaleDateString("zh-CN")}</span></td><td>${button(icon("sound"), "speak-word", "text small", `data-text="${esc(w.text)}" aria-label="播放 ${esc(w.text)}"`)}</td></tr>`).join("")}</tbody></table></div>`;
+    return `<section class="panel empty">${icon("review")}<p>${Object.keys(state.reviews).length ? "这个筛选下没有词条。" : "还没有错词或模糊词，开始一次练习吧。"}</p>${button("去语料库练习", "library-link", "soft")}</section>`;
+  return `<div class="muted" style="font-size:11px;margin-bottom:10px">当前 ${words.length} 词 · 点击小节可打开练习设置</div><div class="table-wrap"><table><thead><tr><th>单词 / 短语</th><th>上次填写</th><th>小节</th><th>错误次数</th><th>模糊记录</th><th>复习状态</th><th>发音</th></tr></thead><tbody>${words.map((w) => `<tr><td><span class="word">${esc(w.text)}</span><span class="sub">${esc(w.phonetic)} ${esc(w.meaning)}</span></td><td>${esc(w.lastTyped || "—")}</td><td>${button(esc(w.sectionId || "旧版"), "section", "text small", `data-id="${esc(w.sectionId)}"`)}</td><td>${w.wrongCount}</td><td><span class="chip ${w.uncertain ? "uncertain-chip" : ""}">${w.uncertain ? "仍模糊" : "已清晰"}</span><span class="sub">累计 ${w.uncertainCount || 0} 次</span>${w.uncertain ? button("取消模糊", "clear-uncertain", "text small", `data-id="${esc(w.wordId)}"`) : ""}</td><td><span class="chip ${w.streak >= 3 ? "green" : new Date(w.due) <= new Date() ? "red" : "purple"}">${new Date(w.due) <= new Date() ? "待复习" : w.streak >= 3 ? "已掌握" : "巩固中"}</span><span class="sub">${new Date(w.due).toLocaleDateString("zh-CN")}</span></td><td>${button(icon("sound"), "speak-word", "text small", `data-text="${esc(w.text)}" aria-label="播放 ${esc(w.text)}"`)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 function historyPage() {
   const hs = state.history.filter(
@@ -602,7 +654,7 @@ function audioFields() {
     )
     .join(
       "",
-    )}</select></div></div><div class="field row"><input id="set-autoPlay" type="checkbox" data-setting="autoPlay" ${s.autoPlay ? "checked" : ""}><label for="set-autoPlay">输入框获得焦点时自动朗读</label></div><div class="flex" style="margin-top:15px">${button(icon("sound") + " 测试语音", "test-voice", "soft")}<small class="muted">播放 accommodation</small></div><div class="audio-status audio-settings-status" role="status" aria-live="polite">点击测试可检查此设备的发音。</div>`;
+    )}</select></div></div><div class="field row"><input id="set-autoPlay" type="checkbox" data-setting="autoPlay" ${s.autoPlay ? "checked" : ""}><label for="set-autoPlay">鼠标或 Tab 进入答案框时自动朗读（Enter 始终播放下一词）</label></div><div class="flex" style="margin-top:15px">${button(icon("sound") + " 测试语音", "test-voice", "soft")}<small class="muted">播放 accommodation</small></div><div class="audio-status audio-settings-status" role="status" aria-live="polite">点击测试可检查此设备的发音。</div>`;
 }
 function backupPanel() {
   const b = backupStatus;
@@ -682,8 +734,10 @@ function modal(title, body, actions = []) {
   );
 }
 function closeModal() {
-  speech.stop();
-  $("#dialog").close();
+  stop();
+  suppressFocusAudio = true;
+  try { $("#dialog").close(); }
+  finally { suppressFocusAudio = false; }
 }
 function download(data, name, type = "application/json") {
   const url = URL.createObjectURL(new Blob([data], { type })),
@@ -726,6 +780,8 @@ function exportWords() {
       "释义",
       "小节",
       "错误次数",
+      "模糊标记",
+      "模糊次数",
       "连续答对",
       "下次复习",
       "上次填写",
@@ -736,6 +792,8 @@ function exportWords() {
       w.meaning,
       w.sectionId,
       w.wrongCount,
+      w.uncertain ? "模糊" : "清晰",
+      w.uncertainCount || 0,
       w.streak,
       w.due,
       w.lastTyped,
@@ -801,8 +859,19 @@ function importDialog() {
     ],
   );
 }
+function focusAnswer(index, { play = false, scroll = false } = {}) {
+  if (!session?.words[index]) return;
+  if (play) stop();
+  activeIndex = index;
+  suppressFocusAudio = true;
+  try { $(`#answer-${index}`)?.focus({ preventScroll: true }); }
+  finally { suppressFocusAudio = false; }
+  if (scroll) $(`#row-${index}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  saveDraft();
+  if (play) void speakRow(index);
+}
 async function speakRow(i) {
-  if (!session) return false;
+  if (!session || !Number.isInteger(i) || i < 0 || i >= session.words.length) return false;
   const token = ++rowPlayToken;
   activeIndex = i;
   const w = session.words[i];
@@ -836,10 +905,7 @@ async function block() {
     session && i < session.words.length && token === blockToken;
     i++
   ) {
-    activeIndex = i;
-    const input = $(`#answer-${i}`);
-    input?.focus();
-    input?.scrollIntoView({ block: "center", behavior: "smooth" });
+    focusAnswer(i, { scroll: true });
     const ok = await speakRow(i);
     if (!ok || token !== blockToken) break;
     await new Promise((r) =>
@@ -892,7 +958,7 @@ function openSection(id) {
 function startSection(mode) {
   const s = sections.find((s) => s.id === currentSection),
     size = $("#batch-size").value,
-    start = Number($("#range-start").value),
+    start = size === "all" ? 1 : Number($("#range-start").value),
     end =
       size === "all"
         ? s.words.length
@@ -956,17 +1022,22 @@ const actions = {
     );
   },
   resume,
+  "continue-section": el => continueSection(el.dataset.id),
+  "toggle-uncertain": el => toggleUncertain(Number(el.dataset.index)),
+  "clear-uncertain": el => {
+    const entry = state.reviews[el.dataset.id];
+    if (!entry) return;
+    entry.uncertain = false;
+    persist();
+    render();
+    toast("已取消当前模糊标记，历史模糊次数保留。");
+  },
+  "retry-uncertain": () => begin(resultWords(lastResult.results.filter(r => r.uncertain)), lastResult.title + " · 模糊词复练", lastResult.sectionId, "review"),
   "start-section": () => startSection("normal"),
   "start-shuffle": () => startSection("shuffle"),
   "save-exit": () => navigate("home"),
-  replay: () => {
-    stop();
-    speakRow(activeIndex);
-  },
-  speak: (el) => {
-    stop();
-    speakRow(Number(el.dataset.index));
-  },
+  replay: () => focusAnswer(activeIndex, { play: true }),
+  speak: el => focusAnswer(Number(el.dataset.index), { play: true }),
   "speak-word": (el) => {
     stop();
     speech.speak(el.dataset.text, state.settings);
@@ -976,7 +1047,7 @@ const actions = {
     state.settings.autoPlay = !state.settings.autoPlay;
     persist();
     const b = $('[data-action="auto"]');
-    b.textContent = "自动发音：" + (state.settings.autoPlay ? "开" : "关");
+    b.textContent = "聚焦播放：" + (state.settings.autoPlay ? "开" : "关");
     b.classList.toggle("soft", state.settings.autoPlay);
   },
   "audio-settings": () =>
@@ -1018,7 +1089,7 @@ const actions = {
   "review-selected": () =>
     begin(
       filteredReviews(),
-      "错词专项复习",
+      reviewFilter === "uncertain" ? "模糊词专项复习" : "错词与模糊词复习",
       reviewChapter || "review",
       "review",
     ),
@@ -1213,35 +1284,42 @@ document.addEventListener("change", (e) => {
 document.addEventListener("focusin", (e) => {
   if (e.target.dataset.answer !== undefined && session) {
     activeIndex = Number(e.target.dataset.answer);
-    if (state.settings.autoPlay && !blockPlaying) {
+    if (blockPlaying && !suppressFocusAudio) stop();
+    if (state.settings.autoPlay && !blockPlaying && !suppressFocusAudio) {
       stop();
       speakRow(activeIndex);
     }
+    if (!suppressFocusAudio) saveDraft();
   }
 });
-document.addEventListener("keydown", (e) => {
-  if (!session || $("#dialog").open) return;
-  if (e.key === "F2") {
+document.addEventListener("keydown", e => {
+  if (!session || $('#dialog').open || e.isComposing || e.keyCode === 229) return;
+  const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+  const answer = e.target.dataset.answer !== undefined;
+  const replay = (e.key === 'F2' && plain)
+    || (e.code === 'KeyR' && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey);
+  const mark = e.key === 'F4' && plain;
+  const advance = e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey;
+  if (e.key === 'Escape') { stop(); return; }
+  if ((replay || mark || advance) && e.repeat) { e.preventDefault(); return; }
+  if (replay) { e.preventDefault(); focusAnswer(activeIndex, { play: true }); return; }
+  if (mark) { e.preventDefault(); toggleUncertain(); return; }
+  if (advance && answer) {
     e.preventDefault();
     stop();
-    speakRow(activeIndex);
-  }
-  if (e.key === "Escape") stop();
-  if (
-    e.key === "Enter" &&
-    e.target.dataset.answer !== undefined &&
-    !e.isComposing
-  ) {
-    e.preventDefault();
-    const i = Number(e.target.dataset.answer);
-    if (i < session.words.length - 1) $(`#answer-${i + 1}`)?.focus();
+    const next = Number(e.target.dataset.answer) + (e.shiftKey ? -1 : 1);
+    if (next >= 0 && next < session.words.length) focusAnswer(next, { play: true, scroll: true });
+    else if (next < 0) toast('已经是第一题。');
     else {
       $('[data-action="finish"]')?.focus();
-      toast("已到最后一题，可以检查或提交听写。");
+      toast('已到最后一题，可以检查或提交听写。');
     }
   }
 });
-$("#dialog").addEventListener("close", () => speech.stop());
+$("#dialog").addEventListener("cancel", e => {
+  e.preventDefault();
+  closeModal();
+});
 window.addEventListener("beforeunload", () => {
   saveDraft();
   speech.stop();

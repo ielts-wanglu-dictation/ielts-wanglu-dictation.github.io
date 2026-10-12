@@ -163,3 +163,37 @@ test('dictionary mode chooses UK phonetics and caches the URL for repeat request
   assert.equal(fetched, 1);
   assert.equal(calls[0].src, 'https://example.test/word-uk.mp3');
 });
+
+test('rapid next-word requests settle all replaced speech and keep only the last playback active', async () => {
+  const engine = speech({ automatic: false });
+  const statuses = [];
+  const p = player(statuses);
+  const old = [], stale = [];
+  for (let index = 0; index < 8; index++) {
+    old.push(p.speak(`word ${index}`));
+    stale.push({ start: engine.calls.at(-1).onstart, end: engine.calls.at(-1).onend });
+  }
+  const latest = p.speak('last word');
+  assert.deepEqual(await Promise.all(old), Array(8).fill(false));
+  const before = statuses.length;
+  for (const callbacks of stale) { callbacks.start(); callbacks.end(); }
+  assert.equal(statuses.length, before);
+  engine.calls.at(-1).onstart();
+  engine.calls.at(-1).onend();
+  assert.equal(await latest, true);
+  assert.equal(statuses.filter(status => status.code === 'ended').length, 1);
+});
+
+test('moving to the next word during a repeat gap prevents old-word repeats', async () => {
+  const engine = speech();
+  const p = player();
+  const old = p.speak('previous', { repeat: 3 });
+  // Let the first utterance finish and enter its cancellable repetition delay.
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(engine.calls.length, 1);
+  const latest = p.speak('next');
+  assert.equal(await old, false);
+  assert.equal(await latest, true);
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.deepEqual(engine.calls.map(call => call.text), ['previous', 'next']);
+});
