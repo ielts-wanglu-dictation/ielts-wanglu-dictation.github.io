@@ -1,3 +1,3 @@
 // Public service address only. No client secret, GitHub token or learning data.
-// Set to the verified production origin after deploying backup-service/.
-export const BACKUP_SERVICE_URL = '';
+// Verified production origin for the private GitHub backup service.
+export const BACKUP_SERVICE_URL = 'https://wanglu-backup-service.vercel.app';
