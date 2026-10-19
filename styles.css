@@ -1599,6 +1599,20 @@ dialog .dialog-actions {
 .study-complete h2 { margin-top: 20px; }
 .study-complete p { margin: 16px 0; }
 .study-complete .flex { margin: 26px 0; }
+.study-tasks { margin: 0 0 24px; }
+.study-tasks .section-header { margin-bottom: 8px; }
+.study-task { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.study-task:last-child { border-bottom: 0; padding-bottom: 0; }
+.study-task > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.study-task .muted { font-size: 12px; margin-top: 5px; }
+.study-task > .flex { flex-shrink: 0; }
+.study-task-list { max-height: 62vh; overflow-y: auto; }
+.study-parent { gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+@media (max-width: 760px) {
+  .study-task { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .study-task > .flex { flex-wrap: wrap; }
+  .study-parent .button { margin-left: auto; }
+}
 @media (max-width: 1000px) { .study-layout { grid-template-columns: 1fr; } }
 @media (max-width: 640px) {
   .study-card, .study-complete { padding: 20px 15px; }

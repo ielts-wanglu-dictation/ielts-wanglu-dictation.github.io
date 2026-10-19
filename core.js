@@ -83,6 +83,11 @@ export function studyDateKey(value = new Date()) {
   return new Date(validDate(value).getTime() + 2 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
+/** The current Beijing study day ends at 22:00 UTC, which is the next Beijing 06:00. */
+export function nextStudyDayStart(now = new Date()) {
+  return new Date(`${studyDateKey(now)}T22:00:00.000Z`);
+}
+
 export function updateReview(previous = {}, isCorrect, now = new Date(), uncertain = false) {
   const date = validDate(now);
   const old = previous || {};
@@ -267,6 +272,16 @@ function validateResult(raw, wordMap) {
   return result;
 }
 
+function validateStudyLink(raw, target) {
+  const hasId = Object.hasOwn(raw, 'studyId'), hasRound = Object.hasOwn(raw, 'studyRound');
+  assert(hasId === hasRound, '学习来源编号与轮次必须同时提供');
+  if (!hasId) return;
+  const id = text(raw.studyId, 500);
+  assert(id.trim().length > 0, '学习来源编号无效');
+  target.studyId = id;
+  target.studyRound = integer(raw.studyRound, 1, 1000000, '学习来源轮次');
+}
+
 function validateSession(raw, wordMap) {
   assert(isRecord(raw), '历史记录格式无效');
   const total = integer(raw.total, 1, 100000, '历史题数');
@@ -289,6 +304,7 @@ function validateSession(raw, wordMap) {
     assert(typeof raw.assisted === 'boolean', '辅助练习标记格式无效');
     session.assisted = raw.assisted;
   }
+  validateStudyLink(raw, session);
   return session;
 }
 
@@ -316,6 +332,7 @@ function validateDraft(raw, wordMap) {
     assert(typeof raw.assisted === 'boolean', '续练辅助标记格式无效');
     draft.assisted = raw.assisted;
   }
+  validateStudyLink(raw, draft);
   if (raw.words !== undefined) {
     assert(Array.isArray(raw.words) && raw.words.length === wordIds.length, '续练词条快照数量不一致');
     draft.words = raw.words.map((word, index) => {
@@ -346,6 +363,11 @@ function validateStudyDraft(raw, wordMap) {
   draft.completed = raw.completed;
   draft.hidden = raw.hidden;
   draft.seen = [...raw.seen];
+  if (Object.hasOwn(raw, 'parentStudyId')) {
+    const id = text(raw.parentStudyId, 500);
+    assert(id.trim().length > 0 && id !== draft.id, '原学习任务编号无效');
+    draft.parentStudyId = id;
+  }
   return draft;
 }
 
@@ -393,6 +415,82 @@ export function advanceStudyDraft(raw, action = 'next') {
   return draft;
 }
 
+/** Active first, then most recently suspended; records remain available for explicit resume. */
+export function getStudyDrafts(state) {
+  return [...(state.studyDraft ? [state.studyDraft] : []), ...(state.savedStudyDrafts || [])];
+}
+
+/** Compare word IDs as a multiset so sorting never resets a task or loses repeated entries. */
+export function sameStudyWords(draft, wordsOrIds, sectionId, mode = 'normal') {
+  if (!draft || draft.sectionId !== sectionId || draft.mode !== mode
+      || !Array.isArray(draft.wordIds) || !Array.isArray(wordsOrIds)
+      || draft.wordIds.length !== wordsOrIds.length) return false;
+  const counts = new Map();
+  for (const id of draft.wordIds) counts.set(id, (counts.get(id) || 0) + 1);
+  for (const word of wordsOrIds) {
+    const id = typeof word === 'string' ? word : word?.id;
+    if (typeof id !== 'string' || !counts.get(id)) return false;
+    counts.set(id, counts.get(id) - 1);
+  }
+  return true;
+}
+
+export function findStudyDraft(state, wordsOrIds, sectionId, mode = 'normal') {
+  return getStudyDrafts(state).find(draft => sameStudyWords(draft, wordsOrIds, sectionId, mode)) || null;
+}
+
+/** Switch tasks without replacing the work in the previously active task. */
+export function activateStudyDraft(state, raw) {
+  inspectJSON(raw);
+  const draft = validateStudyDraft(raw, new Map(corpus.map(word => [word.id, word])));
+  assert(draft, '没有可继续的学习草稿');
+  const existing = getStudyDrafts(state).find(entry => entry.id === draft.id);
+  assert(!existing || sameStudyWords(existing, draft.wordIds, draft.sectionId, draft.mode),
+    '学习任务编号已用于另一组词条');
+  const saved = (state.savedStudyDrafts || []).filter(entry => entry.id !== draft.id);
+  if (state.studyDraft && state.studyDraft.id !== draft.id) saved.unshift(state.studyDraft);
+  assert(saved.length <= 10000, '保存的学习任务超过 10000 份');
+  const next = { ...state, studyDraft: draft };
+  if (saved.length || Object.hasOwn(state, 'savedStudyDrafts')) next.savedStudyDrafts = saved;
+  return next;
+}
+
+/** Finishing or transferring a task removes its active slot without deleting its progress. */
+export function archiveStudyDraft(state) {
+  const next = { ...state };
+  if (state.studyDraft) {
+    const saved = [state.studyDraft, ...(state.savedStudyDrafts || [])
+      .filter(entry => entry.id !== state.studyDraft.id)];
+    assert(saved.length <= 10000, '保存的学习任务超过 10000 份');
+    next.savedStudyDrafts = saved;
+  }
+  delete next.studyDraft;
+  return next;
+}
+
+/** Allocate only unclaimed normal-study words; review tasks never reserve section progress. */
+export function nextStudyBatchForSection(state, section, size = 50) {
+  integer(size, 1, 100000, '学习分组大小');
+  const words = Array.isArray(section) ? section : section?.words || [];
+  const claimed = new Set();
+  for (const draft of getStudyDrafts(state)) {
+    if (draft.mode === 'normal') for (const id of draft.wordIds) claimed.add(id);
+  }
+  for (const session of state.history || []) {
+    if (['normal', 'shuffle'].includes(session.mode)) {
+      for (const result of session.results || []) claimed.add(result.wordId);
+    }
+  }
+  if (state.draft && ['normal', 'shuffle'].includes(state.draft.mode)) {
+    for (const id of state.draft.wordIds) claimed.add(id);
+  }
+  const startIndex = words.findIndex(word => !claimed.has(word.id));
+  if (startIndex < 0) return null;
+  let endIndex = startIndex;
+  while (endIndex < words.length && endIndex - startIndex < size && !claimed.has(words[endIndex].id)) endIndex++;
+  return { startIndex, endIndex, words: words.slice(startIndex, endIndex), size: endIndex - startIndex };
+}
+
 /** Validate first; callers must only replace browser state after this succeeds. */
 export function validateBackup(input, words = corpus) {
   inspectJSON(input);
@@ -430,6 +528,16 @@ export function validateBackup(input, words = corpus) {
   }
   state.draft = validateDraft(raw.draft, wordMap);
   if (Object.hasOwn(raw, 'studyDraft')) state.studyDraft = validateStudyDraft(raw.studyDraft, wordMap);
+  if (Object.hasOwn(raw, 'savedStudyDrafts')) {
+    assert(Array.isArray(raw.savedStudyDrafts) && raw.savedStudyDrafts.length <= 10000,
+      '保存的学习任务格式无效或超过 10000 份');
+    state.savedStudyDrafts = Array.from(raw.savedStudyDrafts, draft => {
+      assert(isRecord(draft), '保存的学习任务格式无效');
+      return validateStudyDraft(draft, wordMap);
+    });
+    const ids = getStudyDrafts(state).map(draft => draft.id);
+    assert(new Set(ids).size === ids.length, '学习任务编号重复');
+  }
   return state;
 }
 
