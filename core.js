@@ -144,15 +144,28 @@ export function nextSectionBatch(history, section, size = 50) {
   return { startIndex, endIndex, words: words.slice(startIndex, endIndex), size: endIndex - startIndex };
 }
 
+/** Assisted consolidation counts as practice, but not an independent accuracy sample. */
+export function computeIndependentStats(history = []) {
+  let totalWords = 0, totalCorrect = 0, sessionCount = 0;
+  for (const session of history) {
+    if (session.assisted === true) continue;
+    const total = Math.max(0, Number(session.total) || 0);
+    if (!total) continue;
+    totalWords += total;
+    totalCorrect += Math.min(total, Math.max(0, Number(session.correct) || 0));
+    sessionCount++;
+  }
+  return { totalWords, totalCorrect, sessionCount,
+    accuracy: totalWords ? Math.round(totalCorrect / totalWords * 100) : null };
+}
+
 export function computeStats(history = [], now = new Date()) {
   const today = studyDateKey(now);
   const days = new Set();
-  let todayCount = 0, totalWords = 0, totalCorrect = 0;
+  let todayCount = 0, totalWords = 0;
   for (const session of history) {
     const total = Math.max(0, Number(session.total) || 0);
-    const correct = Math.min(total, Math.max(0, Number(session.correct) || 0));
     totalWords += total;
-    totalCorrect += correct;
     if (total > 0) {
       const day = studyDateKey(session.date);
       days.add(day);
@@ -170,7 +183,7 @@ export function computeStats(history = [], now = new Date()) {
     cursor.setUTCDate(cursor.getUTCDate() - 1);
   }
   return { todayCount, totalWords, totalSessions: history.length,
-    accuracy: totalWords ? Math.round(totalCorrect / totalWords * 100) : 0, streak };
+    accuracy: computeIndependentStats(history).accuracy ?? 0, streak };
 }
 
 export function createInitialState() {
@@ -269,9 +282,14 @@ function validateSession(raw, wordMap) {
   assert(['normal', 'shuffle', 'review'].includes(raw.mode), '练习模式无效');
   const duration = raw.duration ?? 0;
   assert(typeof duration === 'number' && duration >= 0 && duration <= 31536000, '练习时长无效');
-  return { id: text(raw.id, 500), sectionId: text(raw.sectionId ?? '', 200),
+  const session = { id: text(raw.id, 500), sectionId: text(raw.sectionId ?? '', 200),
     title: text(raw.title ?? '', 500), mode: raw.mode, date: iso(raw.date),
     duration, total, correct, results };
+  if (Object.hasOwn(raw, 'assisted')) {
+    assert(typeof raw.assisted === 'boolean', '辅助练习标记格式无效');
+    session.assisted = raw.assisted;
+  }
+  return session;
 }
 
 function validateDraft(raw, wordMap) {
@@ -294,6 +312,10 @@ function validateDraft(raw, wordMap) {
       && raw.uncertain.every(value => typeof value === 'boolean'), '续练模糊标记格式或数量无效');
     draft.uncertain = [...raw.uncertain];
   }
+  if (Object.hasOwn(raw, 'assisted')) {
+    assert(typeof raw.assisted === 'boolean', '续练辅助标记格式无效');
+    draft.assisted = raw.assisted;
+  }
   if (raw.words !== undefined) {
     assert(Array.isArray(raw.words) && raw.words.length === wordIds.length, '续练词条快照数量不一致');
     draft.words = raw.words.map((word, index) => {
@@ -304,6 +326,69 @@ function validateDraft(raw, wordMap) {
     });
   } else {
     assert(wordIds.every(id => wordMap.has(id)), '续练中含未知词条，请附带词条快照');
+  }
+  return draft;
+}
+
+function validateStudyDraft(raw, wordMap) {
+  if (raw === null) return null;
+  assert(isRecord(raw), '学习草稿格式无效');
+  assert(['normal', 'review'].includes(raw.mode), '学习模式无效');
+  const draft = validateDraft(raw, wordMap);
+  assert(Array.isArray(raw.uncertain) && raw.uncertain.length === draft.wordIds.length
+    && Array.from(raw.uncertain).every(value => typeof value === 'boolean'), '学习模糊标记格式或数量无效');
+  draft.round = integer(raw.round, 1, 1000000, '学习轮次');
+  assert(typeof raw.completed === 'boolean', '学习完成标记格式无效');
+  assert(typeof raw.hidden === 'boolean', '学习遮挡标记格式无效');
+  assert(Array.isArray(raw.seen) && raw.seen.length === draft.wordIds.length
+    && Array.from(raw.seen).every(value => typeof value === 'boolean'), '学习过词标记格式或数量无效');
+  assert(!raw.completed || raw.seen.every(Boolean), '尚有未过词条，不能标记为完成一轮');
+  draft.completed = raw.completed;
+  draft.hidden = raw.hidden;
+  draft.seen = [...raw.seen];
+  return draft;
+}
+
+/** A separate draft keeps studying from changing dictation scores or section coverage. */
+export function createStudyDraft(words, title, sectionId, mode = 'normal', now = new Date(), id = crypto.randomUUID()) {
+  assert(Array.isArray(words) && words.length > 0, '学习词条不能为空');
+  const raw = { id, sectionId, title, mode, wordIds: words.map(word => word?.id), words,
+    answers: words.map(() => ''), uncertain: words.map(() => false), activeIndex: 0,
+    startedAt: validDate(now).toISOString(), elapsed: 0,
+    round: 1, completed: false, hidden: false, seen: words.map(() => false) };
+  return validateStudyDraft(raw, new Map());
+}
+
+/** Only an explicit next/complete action passes a word; browsing backwards never does. */
+export function advanceStudyDraft(raw, action = 'next') {
+  assert(['next', 'prev', 'complete', 'restart'].includes(action), '学习操作无效');
+  const draft = validateStudyDraft(raw, new Map(corpus.map(word => [word.id, word])));
+  assert(draft !== null, '没有可继续的学习草稿');
+  if (action === 'restart') {
+    assert(draft.completed, '请先完成当前学习轮次');
+    draft.round = integer(draft.round + 1, 1, 1000000, '学习轮次');
+    draft.completed = false;
+    draft.seen.fill(false);
+    draft.answers.fill('');
+    draft.activeIndex = 0;
+    draft.hidden = false;
+    return draft;
+  }
+  if (action === 'prev') {
+    const previousIndex = draft.activeIndex;
+    draft.activeIndex = Math.max(0, draft.activeIndex - 1);
+    if (draft.activeIndex !== previousIndex) draft.hidden = false;
+    return draft;
+  }
+  if (draft.completed) return draft;
+  draft.seen[draft.activeIndex] = true;
+  if (action === 'complete' || draft.activeIndex === draft.wordIds.length - 1) {
+    const firstUnseen = draft.seen.indexOf(false);
+    draft.completed = firstUnseen === -1;
+    if (!draft.completed) { draft.activeIndex = firstUnseen; draft.hidden = false; }
+  } else {
+    draft.activeIndex++;
+    draft.hidden = false;
   }
   return draft;
 }
@@ -344,6 +429,7 @@ export function validateBackup(input, words = corpus) {
     }
   }
   state.draft = validateDraft(raw.draft, wordMap);
+  if (Object.hasOwn(raw, 'studyDraft')) state.studyDraft = validateStudyDraft(raw.studyDraft, wordMap);
   return state;
 }
 

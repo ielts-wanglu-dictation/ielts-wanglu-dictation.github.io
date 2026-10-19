@@ -1575,3 +1575,37 @@ dialog .dialog-actions {
     transition: none !important;
   }
 }
+.learning-guide { margin: 22px 0; font-size: 13px; }
+.learning-guide summary { cursor: pointer; color: var(--accent); font-weight: 650; }
+.learning-guide p { margin: 12px 0; max-width: 900px; }
+.study-layout { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr); gap: 22px; align-items: start; }
+.study-card { padding: 30px; min-width: 0; }
+.study-card.study-uncertain { border-color: var(--accent); }
+.study-word-area { min-height: 195px; display: flex; flex-direction: column; justify-content: center; text-align: center; padding: 22px 0; }
+.study-word { font-size: clamp(25px, 3.4vw, 42px); line-height: 1.25; overflow-wrap: anywhere; margin: 0 0 12px; }
+.study-phonetic { color: var(--muted); margin: 0 0 8px; font-size: 17px; }
+.study-meaning { font-size: 16px; margin: 0; }
+.study-play { justify-content: center; margin-bottom: 26px; }
+.study-card label { display: block; margin-bottom: 9px; font-size: 12px; color: var(--muted); }
+#study-copy { width: 100%; font-size: 18px; padding: 13px; }
+.study-copy-help { font-size: 11px; min-height: 36px; }
+.study-navigation { display: flex; gap: 12px; justify-content: space-between; align-items: center; margin: 22px 0 14px; }
+.study-navigation > span { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.study-steps { padding-left: 20px; margin: 18px 0 24px; }
+.study-steps li { margin: 9px 0; }
+.study-layout aside p { font-size: 12px; }
+.study-shortcuts p { line-height: 2.4; }
+.study-complete { padding: 36px; }
+.study-complete h2 { margin-top: 20px; }
+.study-complete p { margin: 16px 0; }
+.study-complete .flex { margin: 26px 0; }
+@media (max-width: 1000px) { .study-layout { grid-template-columns: 1fr; } }
+@media (max-width: 640px) {
+  .study-card, .study-complete { padding: 20px 15px; }
+  .study-word-area { min-height: 175px; }
+  .study-navigation { gap: 6px; }
+  .study-navigation .button { padding: 10px 11px; font-size: 12px; }
+  .study-navigation > span { font-size: 10px; }
+  .study-resume { flex-wrap: wrap; }
+  .study-resume .button { margin-left: auto; }
+}

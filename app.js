@@ -9,6 +9,9 @@ import {
   parseBackup,
   getSectionProgress,
   nextSectionBatch,
+  createStudyDraft,
+  advanceStudyDraft,
+  computeIndependentStats,
 } from "./core.js";
 import { SpeechPlayer } from "./audio.js";
 import { BackupClient } from "./backup.js";
@@ -93,6 +96,7 @@ let page = "home",
   blockToken = 0,
   rowPlayToken = 0,
   blockPlaying = false,
+  studyPlaying = false,
   activeIndex = 0,
   suppressFocusAudio = false,
   startedSegment = 0,
@@ -129,12 +133,15 @@ function stop() {
   blockToken++;
   rowPlayToken++;
   blockPlaying = false;
+  studyPlaying = false;
   speech.stop();
   document
     .querySelectorAll(".dict-row.playing")
     .forEach((e) => e.classList.remove("playing"));
   const b = $('[data-action="block"]');
   if (b) b.innerHTML = icon("play") + " 连播";
+  const studyButton = $('[data-action="study-block"]');
+  if (studyButton) studyButton.innerHTML = icon("play") + " 连续听读";
 }
 function elapsed() {
   return (
@@ -194,7 +201,7 @@ function shell(content) {
     ["settings", "settings", "设置与备份"],
   ];
   const active =
-    page === "section" || page === "practice" || page === "result"
+    page === "section" || page === "practice" || page === "result" || page === "study"
       ? "library"
       : page;
   return `<aside class="sidebar"><a class="brand" href="#home" data-nav="home"><img src="./icon.svg" alt=""><div><strong>听见进步</strong><small>MY DICTATION SPACE</small></div></a><div class="nav-label">我的学习空间</div><nav class="nav" aria-label="主要导航">${navs.map(([id, ic, label]) => `<button data-nav="${id}" class="${active === id ? "active" : ""}" ${active === id ? 'aria-current="page"' : ""}>${icon(ic)}<span>${label}</span>${id === "review" && dueCount() ? `<span class="nav-badge">${dueCount()}</span>` : ""}</button>`).join("")}</nav><div class="sidebar-bottom"><div class="side-note">${icon("sound")}<b>每天一点，听见改变。</b>把听得懂的，变成写得对的。</div><div class="side-foot"><span class="dot"></span> 个人学习 · 本地保存</div></div></aside><div class="main-shell"><header class="topbar"><div class="mobile-logo"><img src="./icon.svg" alt="">听见进步</div><div class="breadcrumbs">我的学习空间 <span style="margin:0 10px">/</span> <strong>${navs.find((n) => n[0] === active)?.[2]}</strong></div><div class="top-actions"><button class="backup-header" data-action="backup-settings" title="查看 GitHub 备份状态"><span class="dot"></span><span data-backup-status>${esc(backupStatus.message)}</span></button>${button(icon("download") + " 备份数据", "export", "small")}<div class="avatar" title="我的听写空间">ME</div></div></header><main id="main" class="main">${storageMessage ? `<div class="notice warning">${esc(storageMessage)}</div>` : ""}${content}<footer class="footer">每一次认真听写，都算数。<br>语料来源：王陆语料库 · 仅供个人学习 &nbsp; / &nbsp; <a href="https://github.com/PipiTang233/wanglu-dictation-app" target="_blank" rel="noopener">原项目</a> · <a href="https://github.com/zyxlele/wanglu-dictation" target="_blank" rel="noopener">初始项目</a> · <a href="https://github.com/ielts-wanglu-dictation/ielts-wanglu-dictation.github.io" target="_blank" rel="noopener">本站源码</a></footer></main></div>`;
@@ -217,7 +224,7 @@ function sectionCards(limit) {
         last = hs.at(-1),
         progress = getSectionProgress(state.history, s),
         done = progress.completedCount;
-      return `<article class="chapter-card"><div class="card-top"><div class="book-icon">${icon("book")}</div><span class="chip ${last ? "green" : ""}">${last ? Math.round((last.correct / last.total) * 100) + "% 正确" : "待开始"}</span></div><h3>第 ${esc(s.id)} 节 · ${s.chapterId === "5" || s.chapterId === "11" ? "短语听写" : "词汇听写"}</h3><p>${s.words.length} 个词条 · ${hs.length ? hs.length + " 次练习" : "开启你的第一遍练习"}</p><div class="progress-track"><span style="width:${Math.min(100, (done / s.words.length) * 100)}%"></span></div><div class="card-bottom"><span>已练 ${Math.min(done, s.words.length)} / ${s.words.length} 词</span>${progress.hasProgress && progress.nextIndex !== null ? button("设置", "section", "small text", `data-id="${esc(s.id)}"`) : ""}${button((progress.hasProgress && progress.nextIndex !== null ? "继续练习 " : "开始练习 ") + icon("arrow"), progress.hasProgress && progress.nextIndex !== null ? "continue-section" : "section", "small text", `data-id="${esc(s.id)}"`)}</div></article>`;
+      return `<article class="chapter-card"><div class="card-top"><div class="book-icon">${icon("book")}</div><span class="chip ${last ? "green" : ""}">${last ? Math.round((last.correct / last.total) * 100) + (last.assisted ? "% 巩固" : "% 独立") : "待开始"}</span></div><h3>第 ${esc(s.id)} 节 · ${s.chapterId === "5" || s.chapterId === "11" ? "短语听写" : "词汇听写"}</h3><p>${s.words.length} 个词条 · ${hs.length ? hs.length + " 次练习" : "开启你的第一遍练习"}</p><div class="progress-track"><span style="width:${Math.min(100, (done / s.words.length) * 100)}%"></span></div><div class="card-bottom"><span>已练 ${Math.min(done, s.words.length)} / ${s.words.length} 词</span>${progress.hasProgress && progress.nextIndex !== null ? button("设置", "section", "small text", `data-id="${esc(s.id)}"`) : ""}${button((progress.hasProgress && progress.nextIndex !== null ? "继续练习 " : "开始练习 ") + icon("arrow"), progress.hasProgress && progress.nextIndex !== null ? "continue-section" : "section", "small text", `data-id="${esc(s.id)}"`)}</div></article>`;
     })
     .join("")}</div>`;
 }
@@ -230,12 +237,13 @@ function recentTable(history, compact = false) {
     .reverse()
     .map(
       (h) =>
-        `<tr><td>${esc(h.title || h.sectionId || "复习")}<span class="sub">${modeLabel(h.mode)}</span></td><td><span class="chip ${h.correct / h.total >= 0.8 ? "green" : "purple"}">${h.total ? Math.round((h.correct / h.total) * 100) : 0}%</span></td>${compact ? "" : `<td>${h.correct} / ${h.total}</td>`}<td class="muted">${dateText(h.date)}</td><td>${button("详情", "history-detail", "small text", `data-id="${esc(h.id)}"`)}</td></tr>`,
+        `<tr><td>${esc(h.title || h.sectionId || "复习")}<span class="sub">${modeLabel(h.mode)} · ${h.assisted ? "巩固练习" : "独立听写"}</span></td><td><span class="chip ${h.correct / h.total >= 0.8 ? "green" : "purple"}">${h.total ? Math.round((h.correct / h.total) * 100) : 0}%</span></td>${compact ? "" : `<td>${h.correct} / ${h.total}</td>`}<td class="muted">${dateText(h.date)}</td><td>${button("详情", "history-detail", "small text", `data-id="${esc(h.id)}"`)}</td></tr>`,
     )
     .join("")}</tbody></table></div>`;
 }
 function home() {
   const s = computeStats(state.history),
+    independent = computeIndependentStats(state.history),
     goal = state.settings.dailyGoal || 50,
     progress = Math.min(100, (s.todayCount / goal) * 100);
   const recentSection = [...state.history].reverse()
@@ -249,15 +257,15 @@ function home() {
       "从一个单词开始，让每一次练习都有迹可循。",
       `<span class="date-pill">${studyDateKey()} 学习日 · 北京时间 06:00 换日</span>`,
     ) +
-    `${state.draft ? `<div class="resume-strip"><span>${icon("save")} 上次练习已保存：${esc(state.draft.title)} · 已填写 ${state.draft.answers.filter(Boolean).length} / ${state.draft.wordIds.length}</span>${button("继续听写 " + icon("arrow"), "resume", "small")}</div>` : recentSection ? continuationPanel(recentSection, true) : ""}<div class="hero-grid"><section class="hero"><div class="hero-copy"><span class="tag">YOUR DAILY LISTENING RITUAL</span><h2>让熟悉的单词，<br>成为听力里的确定感。</h2><p>完整王陆语料库，自选节奏，专注听写。<br>今天的进步，就从下一次播放开始。</p>${button(icon("play") + " 开始今日练习", "daily", "primary")}${button("浏览语料", "library-link", "text")}</div><div class="wave-art" aria-hidden="true">${"<i></i>".repeat(9)}</div></section><section class="panel goal-panel"><div class="panel-top"><h3>今日学习目标</h3>${button("调整目标", "goal", "text small")}</div><div class="goal-body"><div class="goal-ring" style="--progress:${progress}%"><div><strong>${s.todayCount}</strong><span>/ ${goal} 个词</span></div></div><div class="goal-info"><b>${progress >= 100 ? "今日目标已完成" : "给专注留一点时间"}</b><p>${progress >= 100 ? "做得不错，明天继续。" : `再练 ${Math.max(0, goal - s.todayCount)} 个，完成今日目标`}</p><span class="mini">${icon("check")} 每一步都在积累</span></div></div></section></div>` +
+    `${studyResumeStrip()}${state.draft ? `<div class="resume-strip"><span>${icon("save")} 上次练习已保存：${esc(state.draft.title)} · 已填写 ${state.draft.answers.filter(Boolean).length} / ${state.draft.wordIds.length}</span>${button("继续听写 " + icon("arrow"), "resume", "small")}</div>` : recentSection ? continuationPanel(recentSection, true) : ""}<div class="hero-grid"><section class="hero"><div class="hero-copy"><span class="tag">YOUR DAILY LISTENING RITUAL</span><h2>让熟悉的单词，<br>成为听力里的确定感。</h2><p>先看词听音，再回忆拼写。<br>学过的词，留到之后再独立听写。</p>${button(icon("play") + " 开始今日练习", "daily", "primary")}${button("浏览语料", "library-link", "text")}</div><div class="wave-art" aria-hidden="true">${"<i></i>".repeat(9)}</div></section><section class="panel goal-panel"><div class="panel-top"><h3>今日听写目标</h3>${button("调整目标", "goal", "text small")}</div><div class="goal-body"><div class="goal-ring" style="--progress:${progress}%"><div><strong>${s.todayCount}</strong><span>/ ${goal} 个词</span></div></div><div class="goal-info"><b>${progress >= 100 ? "今日目标已完成" : "给专注留一点时间"}</b><p>${progress >= 100 ? "做得不错，明天继续。" : `再练 ${Math.max(0, goal - s.todayCount)} 个，完成今日目标`}</p><span class="mini">${icon("check")} 每一步都在积累</span></div></div></section></div>` +
     metrics([
       ["book", s.totalWords || 0, "词", "累计听写"],
       ["flame", s.streak || 0, "天", "连续练习"],
       [
         "target",
-        s.totalWords ? s.accuracy : "—",
-        s.totalWords ? "%" : "",
-        "整体正确率",
+        independent.accuracy ?? "—",
+        independent.totalWords ? "%" : "",
+        "独立听写正确率",
       ],
       ["review", dueCount(), "词", "待复习词条"],
     ]) +
@@ -275,9 +283,9 @@ function library() {
   );
 }
 function chart(history) {
-  const data = history.slice(-20);
+  const data = history.filter(h => !h.assisted).slice(-20);
   if (!data.length)
-    return '<div class="empty">完成练习后，将在这里显示正确率变化。</div>';
+    return '<div class="empty">完成独立听写后，将在这里显示正确率变化。</div>';
   const points = data.map((h, i) => [
     45 + (data.length === 1 ? 225 : (i * 450) / (data.length - 1)),
     148 - (h.correct / h.total) * 120,
@@ -289,28 +297,29 @@ function continuationPanel(section, compact = false) {
   const progress = getSectionProgress(state.history, section);
   if (!progress.hasProgress) return '';
   const batch = nextSectionBatch(state.history, section, progress.suggestedSize);
-  if (batch) return `<div class="resume-strip continuation-strip"><span>${icon('arrow')}<strong>接着上一组 · 第 ${esc(section.id)} 节</strong><br>已练 ${progress.completedCount} / ${progress.total} 词 · 下一组第 ${batch.startIndex + 1}–${batch.endIndex} 词${compact ? '' : progress.lastMode === 'shuffle' ? ' · 保留乱序模式，已完成的词不会重复' : ' · 按原词序接着练，已完成的词不会重复'}</span>${button('继续练习 ' + icon('play'), 'continue-section', 'primary small', `data-id="${esc(section.id)}"`)}</div>`;
+  if (batch) return `<div class="resume-strip continuation-strip"><span>${icon('arrow')}<strong>接着上一组 · 第 ${esc(section.id)} 节</strong><br>已练 ${progress.completedCount} / ${progress.total} 词 · 下一组第 ${batch.startIndex + 1}–${batch.endIndex} 词${compact ? '' : progress.lastMode === 'shuffle' ? ' · 保留乱序模式，已完成的词不会重复' : ' · 按原词序接着练，已完成的词不会重复'}</span><div class="flex">${button('先学下一组', 'continue-study', 'primary small', `data-id="${esc(section.id)}"`)}${button('继续听写 ' + icon('play'), 'continue-section', 'small', `data-id="${esc(section.id)}"`)}</div></div>`;
   const next = sections[sections.findIndex(s => s.id === section.id) + 1];
   return `<div class="resume-strip continuation-strip"><span>${icon('check')}<strong>本节已练完 · ${progress.total} / ${progress.total} 词</strong><br>可以复习错词与模糊词，或继续下一小节。</span>${next ? button('下一小节 · ' + esc(next.id), 'continue-section', 'primary small', `data-id="${esc(next.id)}"`) : button('浏览全部语料', 'library-link', 'small')}</div>`;
 }
-function continueSection(id) {
+function continueSection(id, study = false) {
   const section = sections.find(s => s.id === id);
   if (!section) return;
   const progress = getSectionProgress(state.history, section);
   const batch = nextSectionBatch(state.history, section, progress.suggestedSize);
   if (!batch) { openSection(id); return; }
-  begin(batch.words, `第 ${id} 节 · ${batch.startIndex + 1}–${batch.endIndex} 词`, id, progress.lastMode || 'normal');
+  (study ? beginStudy : begin)(batch.words, `第 ${id} 节 · ${batch.startIndex + 1}–${batch.endIndex} 词`, id, study ? 'normal' : progress.lastMode || 'normal');
 }
 
 function sectionPage() {
   const s = sections.find((x) => x.id === currentSection),
     hs = sectionHistory(s.id),
-    last = hs.at(-1),
-    best = hs.length
-      ? Math.max(...hs.map((h) => (h.correct / h.total) * 100))
+    independent = hs.filter(h => !h.assisted),
+    last = independent.at(-1),
+    best = independent.length
+      ? Math.max(...independent.map((h) => (h.correct / h.total) * 100))
       : 0,
-    avg = hs.length
-      ? hs.reduce((a, h) => a + (h.correct / h.total) * 100, 0) / hs.length
+    avg = independent.length
+      ? independent.reduce((a, h) => a + (h.correct / h.total) * 100, 0) / independent.length
       : 0;
   const progress = getSectionProgress(state.history, s);
   const start = progress.nextIndex === null ? 1 : progress.nextIndex + 1;
@@ -322,32 +331,118 @@ function sectionPage() {
       `${s.words.length} 个词条 · ${hs.length} 次练习`,
       button(icon("back") + " 返回语料", "library-link"),
     ) +
-    continuationPanel(s) +
+    studyResumeStrip() + continuationPanel(s) +
     metrics([
       [
         "target",
         last ? Math.round((last.correct / last.total) * 100) : "—",
         last ? "%" : "",
-        "最近一次",
+        "最近独立听写",
       ],
       [
         "chart",
-        hs.length ? Math.round(best) : "—",
-        hs.length ? "%" : "",
-        "最高正确率",
+        independent.length ? Math.round(best) : "—",
+        independent.length ? "%" : "",
+        "独立听写最高",
       ],
       [
         "check",
-        hs.length ? Math.round(avg) : "—",
-        hs.length ? "%" : "",
-        "平均正确率",
+        independent.length ? Math.round(avg) : "—",
+        independent.length ? "%" : "",
+        "独立听写平均",
       ],
       ["book", hs.length, "次", "本节练习"],
     ]) +
-    `<div class="section-detail-grid"><section class="panel"><h2>设置这次练习</h2><p class="muted">按原始语料顺序，选择适合今天的练习量。</p><div class="field"><label for="batch-size">练习数量</label><select id="batch-size">${[...new Set([20, 50, 100, size])].sort((a,b)=>a-b).map(n=>`<option value="${n}" ${n===size?"selected":""}>${n===20?"轻量一组":n===50?"标准一组":n===100?"集中练习":"上次分组"} · ${n} 词</option>`).join("")}<option value="all">本节全部 · ${s.words.length} 词</option><option value="range">自选词序范围</option></select></div><div class="form-row"><div class="field"><label for="range-start">起始词序</label><input id="range-start" type="number" min="1" max="${s.words.length}" value="${start}"></div><div class="field"><label for="range-end">结束词序（自选范围时）</label><input id="range-end" type="number" min="1" max="${s.words.length}" value="${Math.min(start + size - 1, s.words.length)}"></div></div><div class="flex" style="margin-top:24px">${button(icon("play") + " 开始听写", "start-section", "primary")}${button(icon("shuffle") + " 乱序测试", "start-shuffle")}</div><p class="muted" style="font-size:11px;margin-top:12px">乱序仅打乱本次选定范围；Enter 下一题并播放，F2 重听，F4 标记模糊。</p></section><section class="panel"><h2>正确率趋势</h2><p class="muted">最近 20 次练习</p>${chart(hs)}${hs.length > 1 ? `<p class="muted">较上次：${Math.round((last.correct / last.total) * 100 - (hs.at(-2).correct / hs.at(-2).total) * 100)} 个百分点</p>` : ""}</section></div><section style="margin-top:26px"><div class="section-header"><h2>本节练习记录</h2>${button("查看本节词表", "preview-words", "small")}</div>${recentTable(hs)}</section>`
+    `<div class="section-detail-grid"><section class="panel"><h2>设置这次练习</h2><p class="muted">按原始语料顺序，选择适合今天的练习量。</p><div class="field"><label for="batch-size">练习数量</label><select id="batch-size">${[...new Set([20, 50, 100, size])].sort((a,b)=>a-b).map(n=>`<option value="${n}" ${n===size?"selected":""}>${n===20?"轻量一组":n===50?"标准一组":n===100?"集中练习":"上次分组"} · ${n} 词</option>`).join("")}<option value="all">本节全部 · ${s.words.length} 词</option><option value="range">自选词序范围</option></select></div><div class="form-row"><div class="field"><label for="range-start">起始词序</label><input id="range-start" type="number" min="1" max="${s.words.length}" value="${start}"></div><div class="field"><label for="range-end">结束词序（自选范围时）</label><input id="range-end" type="number" min="1" max="${s.words.length}" value="${Math.min(start + size - 1, s.words.length)}"></div></div><div class="flex" style="margin-top:24px">${button(icon("book") + " 看词听音", "start-study", "primary")}${button(icon("play") + " 直接听写", "start-section")}${button(icon("shuffle") + " 乱序测试", "start-shuffle")}</div><p class="muted" style="font-size:11px;margin-top:12px">乱序仅打乱本次选定范围；Enter 下一题并播放，F2 重听，F4 标记模糊。</p></section><section class="panel"><h2>独立听写趋势</h2><p class="muted">不含学后或看答案后的巩固练习</p>${chart(hs)}${independent.length > 1 ? `<p class="muted">较上次：${Math.round((last.correct / last.total) * 100 - (independent.at(-2).correct / independent.at(-2).total) * 100)} 个百分点</p>` : ""}</section></div><section style="margin-top:26px"><div class="section-header"><h2>本节练习记录</h2>${button("查看本节词表", "preview-words", "small")}</div>${recentTable(hs)}</section>` + learningGuide()
   );
 }
-function begin(words, title, sectionId, mode = "normal", force = false) {
+function learningGuide() {
+  return `<details class="panel learning-guide"><summary>怎样用语料库学习？</summary><p>初次接触时，可以先看词听音、跟读抄写，再遮词回忆；已有基础时，也可以直接听写找出薄弱词。</p><p>王陆在 2017 年的官方说明中建议：集中听写 → 订正并整理错词 → 分天看词、抄写、跟录音朗读 → 下周复测。不要把刚记住答案后的高分当作长期掌握。</p><p>本站的“先学后测”是按你的需要做的适配。学习不计听写成绩；学后巩固单独标记，独立听写只在提交后批改。每日目标统计已提交的听写词数。</p><p class="muted">当前使用合成语音 / 词典发音，还没有教材原录音。原录音的横向、纵向和倍速训练不能与本站乱序、合成语音速度直接等同。</p><a href="https://ielts.guixue.com/article/2258.shtml" target="_blank" rel="noopener">查看王陆官方学习方法（2017 年） ↗</a></details>`;
+}
+function studyResumeStrip() {
+  const d = state.studyDraft;
+  return d ? `<div class="resume-strip continuation-strip study-resume"><span>${icon('book')} <strong>看词听音 · ${esc(d.title)}</strong><br>第 ${d.round} 轮 · ${d.completed ? '本轮已完成，可再次学习或进入听写' : `本轮已过 ${d.seen.filter(Boolean).length} / ${d.wordIds.length} 词 · 停在第 ${d.activeIndex + 1} 词`}</span>${button('继续学习 ' + icon('arrow'), 'study-resume', 'small soft')}</div>` : '';
+}
+function beginStudy(words, title, sectionId, mode = 'normal', force = false) {
+  if (!words.length) { toast('当前没有可学习的词条。'); return; }
+  if (state.studyDraft && !force) {
+    modal('开始新的学习？', `<p>已有「${esc(state.studyDraft.title)}」的学习进度。新学习会替换这份学习草稿；听写草稿仍会保留。</p>`, [
+      { label: '继续原学习', action: () => { closeModal(); resumeStudy(); } },
+      { label: '开始新学习', primary: true, action: () => { closeModal(); beginStudy(words, title, sectionId, mode, true); } },
+    ]);
+    return;
+  }
+  suspend();
+  state.studyDraft = createStudyDraft(words, title, sectionId, mode);
+  state.studyDraft.uncertain = words.map(w => Boolean(state.reviews[w.id]?.uncertain));
+  persist();
+  resumeStudy();
+}
+function resumeStudy() {
+  if (!state.studyDraft) return;
+  suspend();
+  page = 'study'; render(); window.scrollTo(0, 0);
+  if (!state.studyDraft.completed) { focusStudy(); void playStudy(); }
+}
+function focusStudy() { $('#study-copy')?.focus({ preventScroll: true }); }
+function studyPage() {
+  const d = state.studyDraft, words = wordsForDraft(d), w = words[d.activeIndex];
+  const uncertain = d.uncertain.filter(Boolean).length;
+  const head = `<div class="session-head"><div><div class="eyebrow">LOOK. LISTEN. RECALL.</div><h1>${esc(d.title)}</h1><p>看词听音 · 第 ${d.round} 轮 · ${words.length} 词 · 学习进度自动保存</p></div>${button(icon('save') + ' 保存并退出', 'save-exit')}</div>`;
+  if (d.completed) return head + `<section class="panel study-complete"><span class="chip green">第 ${d.round} 轮已完成</span><h2>再回忆一次，然后给记忆一点时间。</h2><p>本组 ${words.length} 词 · 模糊 ${uncertain} 词。看过和听过不等于掌握，隔天再独立听写检查。</p><div class="flex">${button(icon('play') + ' 进入听写巩固', 'study-test', 'primary')}${button('整组再学一轮', 'study-restart')}${button('只学模糊词', 'study-uncertain-only', '', uncertain ? '' : 'disabled')}${nextStudyBatch() ? button('学习下一组', 'study-next-batch') : ''}${button('稍后再测', 'save-exit', 'text')}</div><p class="muted">本轮学习没有增加听写成绩或已掌握词数。进入听写后不带入抄写答案，成绩标记为“巩固练习”。</p></section>` + learningGuide();
+  return head + `<div class="study-layout"><section class="panel study-card ${d.uncertain[d.activeIndex] ? 'study-uncertain' : ''}"><div class="flex space"><span class="chip">第 ${d.activeIndex + 1} / ${words.length} 词</span>${button(d.uncertain[d.activeIndex] ? '已标记模糊' : '标记模糊', 'study-uncertain', 'uncertain-toggle', `aria-pressed="${d.uncertain[d.activeIndex]}"`)}</div><div class="study-word-area" aria-live="polite">${d.hidden ? '<h2 class="study-word">答案已遮住</h2><p class="muted">先听发音，试着回忆并拼写，再展开核对。</p>' : `<h2 id="study-word" class="study-word">${esc(w.text)}</h2><p class="study-phonetic">${esc(w.phonetic)}</p><p class="study-meaning">${esc(w.meaning)}</p>`}</div><div class="flex study-play">${button(icon('sound') + ' 重听 / 跟读', 'study-replay', 'primary')}${button(d.hidden ? '显示答案核对' : '遮词回忆', 'study-hide', '', `aria-pressed="${d.hidden}"`)}</div><label for="study-copy">${d.hidden ? '凭听音回忆拼写' : '边听边抄写（可选）'}</label><input id="study-copy" value="${esc(d.answers[d.activeIndex])}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="${d.hidden ? '试着拼写，再展开核对…' : '跟读后抄写，或在纸上写…'}" enterkeyhint="next"><p class="study-copy-help muted">${d.hidden ? '只用于自查，不计成绩。' : '遮词时会清空当前抄写，便于重新回忆；再看答案后可自行核对。'}</p><div class="study-navigation">${button(icon('back') + ' 上一个', 'study-prev', '', d.activeIndex === 0 ? 'disabled' : '')}<span>${d.seen.filter(Boolean).length} / ${words.length} 已过</span>${button((d.activeIndex === words.length - 1 ? '完成本轮' : '下一个') + ' ' + icon('arrow'), 'study-next', 'primary')}</div><div class="progress-track"><span style="width:${100 * d.seen.filter(Boolean).length / words.length}%"></span></div></section><aside class="stack"><section class="panel"><h2>连接声音与拼写</h2><ol class="study-steps"><li>看词听音，留意重音和词尾。</li><li>跟读一遍，再抄写或默写。</li><li>遮词回忆；仍不熟悉就标记模糊。</li></ol><div class="flex">${button(icon(studyPlaying ? 'pause' : 'play') + (studyPlaying ? ' 停止听读' : ' 连续听读'), 'study-block')}${button(icon('settings') + ' 发音设置', 'audio-settings')}</div><div id="audio-status" class="audio-status" aria-live="polite">当前为合成语音 / 词典发音，不是教材原录音。</div><p class="muted">连续听读按发音设置中的重复次数与间隔播放，到本轮结束即停止。模糊词立即加入复习，不增加错误次数。</p></section><section class="panel study-shortcuts"><h3>流畅学习</h3><p><kbd>Enter</kbd> 从抄写框进入下一词并播放<br><kbd>Shift</kbd> + <kbd>Enter</kbd> 上一词<br><kbd>F2</kbd> / <kbd>Alt</kbd> + <kbd>R</kbd> 重听<br><kbd>F4</kbd> 模糊标记 · <kbd>Esc</kbd> 停止</p>${button('直接进入听写巩固', 'study-test', 'small text')}</section></aside></div>` + learningGuide();
+}
+async function playStudy() {
+  if (page !== 'study' || !state.studyDraft || state.studyDraft.completed) return false;
+  const d = state.studyDraft;
+  return speech.speak(wordsForDraft(d)[d.activeIndex].text, state.settings);
+}
+function moveStudy(action) {
+  stop();
+  state.studyDraft = advanceStudyDraft(state.studyDraft, action);
+  persist(); render(); focusStudy();
+  if (!state.studyDraft.completed) void playStudy();
+}
+function toggleStudyUncertain() {
+  const d = state.studyDraft, i = d.activeIndex, w = wordsForDraft(d)[i];
+  d.uncertain[i] = !d.uncertain[i];
+  const old = state.reviews[w.id];
+  if (d.uncertain[i]) {
+    state.reviews[w.id] = { wordId: w.id, text: w.text, meaning: w.meaning || '', phonetic: w.phonetic || '', sectionId: w.sectionId || '', lastTyped: old?.lastTyped || '', ...old, ...updateReview(old, true, new Date(), true) };
+  } else if (old) old.uncertain = false;
+  persist(); render(); focusStudy();
+}
+async function studyBlock() {
+  if (studyPlaying) { stop(); return; }
+  stop(); studyPlaying = true;
+  const token = blockToken;
+  render();
+  while (page === 'study' && studyPlaying && !state.studyDraft.completed && token === blockToken) {
+    const ok = await playStudy();
+    if (!ok || token !== blockToken) break;
+    await new Promise(resolve => setTimeout(resolve, Number(state.settings.interval) * 1000));
+    if (token !== blockToken || page !== 'study') return;
+    state.studyDraft = advanceStudyDraft(state.studyDraft, 'next');
+    persist(); render();
+  }
+  if (token === blockToken) stop();
+}
+function studyTest() {
+  const d = state.studyDraft;
+  begin(wordsForDraft(d), d.title, d.sectionId, d.mode, false, { assisted: true, uncertain: [...d.uncertain] });
+}
+function nextStudyBatch() {
+  const d = state.studyDraft;
+  if (!d || d.mode === 'review') return null;
+  const section = sections.find(s => s.id === d.sectionId);
+  if (!section) return null;
+  const selected = new Set(d.wordIds);
+  const start = section.words.reduce((last, w, i) => selected.has(w.id) ? i + 1 : last, 0);
+  if (!start || start >= section.words.length) return null;
+  const words = section.words.slice(start, start + d.wordIds.length);
+  return { words, title: `第 ${section.id} 节 · ${start + 1}–${start + words.length} 词`, sectionId: section.id };
+}
+function begin(words, title, sectionId, mode = "normal", force = false, options = {}) {
   if (!words.length) {
     toast("当前没有可练习的词条。");
     return;
@@ -369,7 +464,7 @@ function begin(words, title, sectionId, mode = "normal", force = false) {
           primary: true,
           action: () => {
             closeModal();
-            begin(words, title, sectionId, mode, true);
+            begin(words, title, sectionId, mode, true, options);
           },
         },
       ],
@@ -386,11 +481,12 @@ function begin(words, title, sectionId, mode = "normal", force = false) {
     wordIds: ordered.map((w) => w.id),
     words: ordered,
     answers: ordered.map(() => ""),
-    uncertain: ordered.map(() => false),
+    uncertain: ordered.map((w) => Boolean(options.uncertain?.[words.indexOf(w)])),
     activeIndex: 0,
     startedAt: new Date().toISOString(),
     elapsed: 0,
   };
+  if (options.assisted) session.assisted = true;
   startedSegment = Date.now();
   activeIndex = 0;
   alignment = [];
@@ -429,13 +525,13 @@ function resume() {
   focusAnswer(activeIndex, { play: true });
 }
 function practicePage() {
-  return `<div class="session-head"><div><div class="eyebrow">LISTEN. TYPE. REPEAT.</div><h1>${esc(session.title)}</h1><p>${modeLabel(session.mode)} · ${session.words.length} 词 · <span id="answered-count">${session.answers.filter(a => a.trim()).length}</span> 已填写 · <span id="uncertain-count">${session.uncertain.filter(Boolean).length}</span> 模糊 · 草稿自动保存</p></div>${button(icon('save') + ' 保存并退出', 'save-exit')}</div>
+  return `<div class="session-head"><div><div class="eyebrow">LISTEN. TYPE. REPEAT.</div><h1>${esc(session.title)}</h1><p>${modeLabel(session.mode)} · ${session.assisted ? "巩固练习（不计独立正确率）" : "独立听写"} · ${session.words.length} 词 · <span id="answered-count">${session.answers.filter(a => a.trim()).length}</span> 已填写 · <span id="uncertain-count">${session.uncertain.filter(Boolean).length}</span> 模糊 · 草稿自动保存</p></div>${button(icon('save') + ' 保存并退出', 'save-exit')}</div>
   <div class="practice-toolbar"><div class="toolbar">${button(icon('sound') + ' 重听当前词', 'replay', 'primary')}${button(icon('play') + ' 连播', 'block')}${button('聚焦播放：' + (state.settings.autoPlay ? '开' : '关'), 'auto', state.settings.autoPlay ? 'soft' : '')}${button(icon('settings') + ' 发音设置', 'audio-settings')}</div>
   <div class="shortcut-help"><span><kbd>Enter</kbd> 下一题并播放</span><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 上一题</span><span><kbd>F2</kbd> / <kbd>Alt</kbd> + <kbd>R</kbd> 重听</span><span><kbd>F4</kbd> 模糊标记</span><span><kbd>Esc</kbd> 停止</span></div>
   <div id="audio-status" class="audio-status" aria-live="polite">Enter 自动播放下一词；“聚焦播放”控制鼠标或 Tab 进入答案框时是否播放。</div></div>
   <div class="flex space" style="margin:14px 0"><span class="muted" style="font-size:11px">答案填错行？先选中需要调整的输入框。模糊标记跟随词条保存。</span><div class="flex">${button('插入空行 ↓', 'align-down', 'small')}${button('答案上移 ↑', 'align-up', 'small')}${button('撤销调整', 'align-undo', 'small')}</div></div>
   <div class="practice-list">${session.words.map((w,i) => `<div class="dict-row ${session.uncertain[i] ? 'uncertain-row' : ''}" id="row-${i}"><span class="num">${i + 1}</span>${button(icon('sound'), 'speak', 'text', `data-index="${i}" aria-label="播放第 ${i + 1} 词"`)}<label class="sr-only" for="answer-${i}">第 ${i + 1} 题答案</label><input id="answer-${i}" data-answer="${i}" value="${esc(session.answers[i])}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="听音后输入…" enterkeyhint="${i === session.words.length - 1 ? 'done' : 'next'}">${button('模糊', 'toggle-uncertain', 'uncertain-toggle', `data-index="${i}" aria-label="标记第 ${i + 1} 词为模糊" aria-pressed="${session.uncertain[i]}" title="不确定就标记，答对也会加入复习（F4）"`)}<div class="answer-feedback" hidden></div></div>`).join('')}</div>
-  <div class="practice-end"><span>支持常见英美拼写；忽略大小写和首尾空格。<br>模糊与对错独立记录；「检查答案」不写入历史，提交后才计入统计。</span><div class="flex">${button('检查答案', 'check')}${button('提交听写 ' + icon('check'), 'finish', 'primary')}</div></div>`;
+  <div class="practice-end"><span>支持常见英美拼写；忽略大小写和首尾空格。<br>模糊与对错独立记录；提交后计入统计；提前看答案会转为巩固练习。</span><div class="flex">${button('看答案转巩固', 'check')}${button('提交听写 ' + icon('check'), 'finish', 'primary')}</div></div>`;
 }
 function toggleUncertain(index = activeIndex) {
   if (!session || !session.words[index]) return;
@@ -458,8 +554,17 @@ function getResults() {
     uncertain: Boolean(session.uncertain[i]),
   }));
 }
-function check() {
+function check(confirmed = false) {
+  if (!session.assisted && !confirmed) {
+    modal("提前看答案？", "<p>看答案后，本次将标记为巩固练习，不计入独立听写正确率。想检验真实听辨能力，请直接提交听写。</p>", [
+      { label: "继续独立作答", action: closeModal },
+      { label: "看答案并转为巩固", primary: true, action: () => { closeModal(); check(true); } },
+    ]);
+    return;
+  }
   stop();
+  session.assisted = true;
+  saveDraft(); render();
   getResults().forEach((r, i) => {
     const row = $(`#row-${i}`);
     row.classList.remove("good", "bad");
@@ -468,7 +573,7 @@ function check() {
     el.hidden = false;
     el.innerHTML = `<span class="${r.ok ? "good-text" : "bad-text"}">${r.ok ? "✓ 正确" : "正确答案：" + esc(r.text)}</span> <span class="muted">${esc(r.meaning)}</span>`;
   });
-  toast("已检查，尚未计入历史。修改后提交会重新批改。");
+  toast("已转为巩固练习；提交后保存，不计独立听写正确率。");
 }
 function finish(confirmed = false) {
   if (!session) return;
@@ -505,10 +610,13 @@ function finish(confirmed = false) {
       correct,
       results,
     };
+  if (session.assisted) h.assisted = true;
   if (!state.history.some((x) => x.id === h.id)) {
     state.history.push(h);
     for (const r of results) {
       const old = state.reviews[r.wordId];
+      // Seeing answers can consolidate memory, but cannot certify independent recall.
+      if (h.assisted && r.ok && !r.uncertain) continue;
       if (!r.ok || r.uncertain || old)
         state.reviews[r.wordId] = {
           ...old,
@@ -545,10 +653,10 @@ function resultPage() {
     heading(
       "EVERY TRY COUNTS",
       "这一遍，完成了。",
-      `${esc(h.title || h.sectionId)} · ${modeLabel(h.mode)} · ${dateText(h.date)}`,
+      `${esc(h.title || h.sectionId)} · ${modeLabel(h.mode)} · ${h.assisted ? "巩固练习" : "独立听写"} · ${dateText(h.date)}`,
     ) +
     (section ? continuationPanel(section) : "") +
-    `<section class="panel results-hero"><div><div class="score">${Math.round((h.correct / h.total) * 100)}<small>%</small></div><span class="muted">本次正确率</span></div><div><h2>${h.correct === h.total ? "全部答对，记得按时复习。" : "找到错词，就是进步的开始。"}</h2><p class="muted">答对 ${h.correct} / ${h.total} 词 · 模糊 ${uncertainCount} 词 · 用时 ${Math.floor((h.duration || 0) / 60)} 分 ${(h.duration || 0) % 60} 秒</p><div class="flex">${button("重练本次模糊词", "retry-uncertain", "soft", uncertainCount ? "" : "disabled")}${button(icon("review") + " 重练本次错词", "retry-wrong", "", h.results.some((r) => !r.ok) ? "" : "disabled")}${button(h.results.length < h.total ? "重练已有词条" : "再练一次", "retry", "", h.results.length ? "" : "disabled")}${button(icon("shuffle") + " 乱序重练", "retry-shuffle", "", h.results.length ? "" : "disabled")}</div></div></section><div class="section-header"><h2>逐词批改</h2><div class="tabs"><button data-result-filter="wrong" class="${resultFilter === "wrong" ? "active" : ""}">错词 ${h.results.filter((r) => !r.ok).length}</button><button data-result-filter="uncertain" class="${resultFilter === "uncertain" ? "active" : ""}">模糊 ${uncertainCount}</button><button data-result-filter="all" class="${resultFilter === "all" ? "active" : ""}">全部 ${h.results.length}</button></div></div>${h.results.length < h.total ? '<div class="notice">旧版备份只保留了部分答题明细。总成绩仍按原记录显示，下方仅列出已有词条；重练也仅包含这些词条。</div>' : ""}${h.results.length ? resultList(h.results.filter(r => resultFilter === "all" || (resultFilter === "uncertain" ? r.uncertain : !r.ok))) : '<div class="empty">这是一条旧版汇总记录，没有逐词详情。</div>'}`
+    `${h.assisted ? '<div class="notice">这是学后或看过答案的巩固练习，不计独立听写正确率，也不增加掌握次数。下次可从小节页直接听写，检验是否仍能听出并拼对。</div>' : ""}<section class="panel results-hero"><div><div class="score">${Math.round((h.correct / h.total) * 100)}<small>%</small></div><span class="muted">${h.assisted ? "巩固正确率 · 不计独立成绩" : "本次独立正确率"}</span></div><div><h2>${h.correct === h.total ? "全部答对，记得按时复习。" : "找到错词，就是进步的开始。"}</h2><p class="muted">答对 ${h.correct} / ${h.total} 词 · 模糊 ${uncertainCount} 词 · 用时 ${Math.floor((h.duration || 0) / 60)} 分 ${(h.duration || 0) % 60} 秒</p><div class="flex">${button(icon("book") + " 学习本次错词与模糊词", "study-result", "primary", h.results.some(r => !r.ok || r.uncertain) ? "" : "disabled")}${button("重练本次模糊词", "retry-uncertain", "soft", uncertainCount ? "" : "disabled")}${button(icon("review") + " 重练本次错词", "retry-wrong", "", h.results.some((r) => !r.ok) ? "" : "disabled")}${button(h.results.length < h.total ? "重练已有词条" : "再练一次", "retry", "", h.results.length ? "" : "disabled")}${button(icon("shuffle") + " 乱序重练", "retry-shuffle", "", h.results.length ? "" : "disabled")}</div></div></section><div class="section-header"><h2>逐词批改</h2><div class="tabs"><button data-result-filter="wrong" class="${resultFilter === "wrong" ? "active" : ""}">错词 ${h.results.filter((r) => !r.ok).length}</button><button data-result-filter="uncertain" class="${resultFilter === "uncertain" ? "active" : ""}">模糊 ${uncertainCount}</button><button data-result-filter="all" class="${resultFilter === "all" ? "active" : ""}">全部 ${h.results.length}</button></div></div>${h.results.length < h.total ? '<div class="notice">旧版备份只保留了部分答题明细。总成绩仍按原记录显示，下方仅列出已有词条；重练也仅包含这些词条。</div>' : ""}${h.results.length ? resultList(h.results.filter(r => resultFilter === "all" || (resultFilter === "uncertain" ? r.uncertain : !r.ok))) : '<div class="empty">这是一条旧版汇总记录，没有逐词详情。</div>'}`
   );
 }
 function reviewPage() {
@@ -573,7 +681,7 @@ function reviewPage() {
       )
       .join(
         "",
-      )}</div><div class="flex">${button(icon("play") + " 练习当前筛选", "review-selected", "primary")}${button("复习今日到期词", "review-due")}</div></div><div class="toolbar"><label class="sr-only" for="review-search">搜索错词</label><input id="review-search" type="search" value="${esc(reviewSearch)}" placeholder="搜索错词或释义…"><label class="sr-only" for="review-chapter">错词小节</label><select id="review-chapter"><option value="">全部小节</option>${sections.map((s) => `<option value="${s.id}" ${reviewChapter === s.id ? "selected" : ""}>第 ${s.id} 节</option>`).join("")}</select><label class="sr-only" for="review-sort">错词排序</label><select id="review-sort"><option value="count" ${reviewSort === "count" ? "selected" : ""}>错误次数最多</option><option value="uncertain" ${reviewSort === "uncertain" ? "selected" : ""}>模糊次数最多</option><option value="date" ${reviewSort === "date" ? "selected" : ""}>最近练习优先</option><option value="chapter" ${reviewSort === "chapter" ? "selected" : ""}>按小节分组</option></select></div><div id="review-table">${reviewTable()}</div>`
+      )}</div><div class="flex">${button(icon("book") + " 学习当前筛选", "study-review", "primary")}${button(icon("play") + " 听写当前筛选", "review-selected")}${button("复习今日到期词", "review-due")}</div></div><div class="toolbar"><label class="sr-only" for="review-search">搜索错词</label><input id="review-search" type="search" value="${esc(reviewSearch)}" placeholder="搜索错词或释义…"><label class="sr-only" for="review-chapter">错词小节</label><select id="review-chapter"><option value="">全部小节</option>${sections.map((s) => `<option value="${s.id}" ${reviewChapter === s.id ? "selected" : ""}>第 ${s.id} 节</option>`).join("")}</select><label class="sr-only" for="review-sort">错词排序</label><select id="review-sort"><option value="count" ${reviewSort === "count" ? "selected" : ""}>错误次数最多</option><option value="uncertain" ${reviewSort === "uncertain" ? "selected" : ""}>模糊次数最多</option><option value="date" ${reviewSort === "date" ? "selected" : ""}>最近练习优先</option><option value="chapter" ${reviewSort === "chapter" ? "selected" : ""}>按小节分组</option></select></div><div id="review-table">${reviewTable()}</div>`
   );
 }
 function filteredReviews() {
@@ -606,7 +714,7 @@ function historyPage() {
   const hs = state.history.filter(
       (h) => !historySection || h.sectionId === historySection,
     ),
-    stats = computeStats(hs);
+    stats = computeStats(hs), independent = computeIndependentStats(hs);
   return (
     heading(
       "YOUR PROGRESS, MADE VISIBLE",
@@ -618,9 +726,9 @@ function historyPage() {
       ["check", stats.totalWords || 0, "词", "累计听写"],
       [
         "target",
-        hs.length ? stats.accuracy : "—",
-        hs.length ? "%" : "",
-        "整体正确率",
+        independent.accuracy ?? "—",
+        independent.totalWords ? "%" : "",
+        "独立听写正确率",
       ],
       [
         "clock",
@@ -629,7 +737,7 @@ function historyPage() {
         "累计用时",
       ],
     ]) +
-    `<section class="panel"><h2>最近 20 次正确率</h2>${chart(hs)}</section><div class="toolbar"><h2 style="margin-right:auto">练习记录</h2><label class="sr-only" for="history-section">按小节筛选历史</label><select id="history-section"><option value="">全部小节</option>${sections.map((s) => `<option value="${s.id}" ${historySection === s.id ? "selected" : ""}>第 ${s.id} 节</option>`).join("")}</select></div>${recentTable(hs)}`
+    `<section class="panel"><h2>最近 20 次独立听写正确率</h2><p class="muted">巩固练习在下方单独标记，不进入趋势或增加掌握次数。</p>${chart(hs)}</section><div class="toolbar"><h2 style="margin-right:auto">练习记录</h2><label class="sr-only" for="history-section">按小节筛选历史</label><select id="history-section"><option value="">全部小节</option>${sections.map((s) => `<option value="${s.id}" ${historySection === s.id ? "selected" : ""}>第 ${s.id} 节</option>`).join("")}</select></div>${recentTable(hs)}`
   );
 }
 function audioFields() {
@@ -699,10 +807,19 @@ function settingsPage() {
       "按自己的节奏，练习。",
       "先保存到本机，连接 GitHub 后自动备份到你的私有仓库。",
     ) +
-    `<div class="settings-grid"><section class="panel"><h2>听写与发音</h2>${audioFields()}<p class="muted" style="font-size:11px;margin-top:18px">本机语音由浏览器和系统提供；若未安装英语语音，将尝试在线备用源。短语优先合成语音。这里的发音不是原书配套录音。</p></section><div class="stack"><section id="github-backup-panel" class="panel">${backupPanel()}</section><section class="panel"><h2>我的学习偏好</h2><div class="form-row"><div class="field"><label for="set-dailyGoal">每日目标（词）</label><input id="set-dailyGoal" data-setting="dailyGoal" type="number" min="1" max="1000" value="${state.settings.dailyGoal}"></div><div class="field"><label for="set-theme">界面主题</label><select id="set-theme" data-setting="theme"><option value="light" ${state.settings.theme === "light" ? "selected" : ""}>浅色 · 安静书桌</option><option value="dark" ${state.settings.theme === "dark" ? "selected" : ""}>深色 · 夜间练习</option><option value="system" ${state.settings.theme === "system" ? "selected" : ""}>跟随系统</option></select></div></div></section><section class="panel"><h2>备份与迁移</h2><p class="muted" style="font-size:12px;margin-top:9px">文件备份包含练习历史、错词、设置和未完成草稿。即使未连接 GitHub，也可以随时导出或手动恢复。</p><div class="flex">${button(icon("download") + " 导出全部数据", "export", "primary")}${button(icon("upload") + " 导入数据", "import")}${button("导出错词 CSV", "export-words", "small")}</div><p class="muted" style="font-size:11px;margin-top:14px">兼容原项目 wl2 / wl3 的 {hist, wb} 备份；导入前自动下载当前数据备份。文件先在本地校验；连接 GitHub 后，导入的进度也会自动备份。</p></section><section class="panel"><h2>离线使用</h2><p class="muted" style="font-size:12px;margin-top:9px">首次联网打开后会缓存页面和全部语料。支持的浏览器可将本站添加到主屏幕。本机英语语音可离线使用；词典及在线备用发音仍需联网。</p>${button("刷新离线缓存", "update-cache", "small")}</section></div></div><section class="panel danger-zone"><h3>清空本机学习数据</h3><p class="muted" style="font-size:12px">仅清除此浏览器的数据，并断开 GitHub 备份连接；仓库中的备份保留。请先导出文件备份。</p>${button("清空数据…", "clear", "danger small")}</section>`
+    `<div class="settings-grid"><section class="panel"><h2>听写与发音</h2>${audioFields()}<p class="muted" style="font-size:11px;margin-top:18px">本机语音由浏览器和系统提供；若未安装英语语音，将尝试在线备用源。短语优先合成语音。这里的发音不是原书配套录音。</p></section><div class="stack"><section id="github-backup-panel" class="panel">${backupPanel()}</section><section class="panel"><h2>我的学习偏好</h2><div class="form-row"><div class="field"><label for="set-dailyGoal">每日目标（词）</label><input id="set-dailyGoal" data-setting="dailyGoal" type="number" min="1" max="1000" value="${state.settings.dailyGoal}"></div><div class="field"><label for="set-theme">界面主题</label><select id="set-theme" data-setting="theme"><option value="light" ${state.settings.theme === "light" ? "selected" : ""}>浅色 · 安静书桌</option><option value="dark" ${state.settings.theme === "dark" ? "selected" : ""}>深色 · 夜间练习</option><option value="system" ${state.settings.theme === "system" ? "selected" : ""}>跟随系统</option></select></div></div></section><section class="panel"><h2>备份与迁移</h2><p class="muted" style="font-size:12px;margin-top:9px">文件备份包含练习历史、错词、设置、学习进度和听写草稿。即使未连接 GitHub，也可以随时导出或手动恢复。</p><div class="flex">${button(icon("download") + " 导出全部数据", "export", "primary")}${button(icon("upload") + " 导入数据", "import")}${button("导出错词 CSV", "export-words", "small")}</div><p class="muted" style="font-size:11px;margin-top:14px">兼容原项目 wl2 / wl3 的 {hist, wb} 备份；导入前自动下载当前数据备份。文件先在本地校验；连接 GitHub 后，导入的进度也会自动备份。</p></section><section class="panel"><h2>离线使用</h2><p class="muted" style="font-size:12px;margin-top:9px">首次联网打开后会缓存页面和全部语料。支持的浏览器可将本站添加到主屏幕。本机英语语音可离线使用；词典及在线备用发音仍需联网。</p>${button("刷新离线缓存", "update-cache", "small")}</section></div></div><section class="panel danger-zone"><h3>清空本机学习数据</h3><p class="muted" style="font-size:12px">仅清除此浏览器的数据，并断开 GitHub 备份连接；仓库中的备份保留。请先导出文件备份。</p>${button("清空数据…", "clear", "danger small")}</section>`
   );
 }
 function render() {
+  // A paused test is no longer independent after its answer is shown in study.
+  const studying = state.studyDraft;
+  if (page === 'study' && studying && !studying.completed && !studying.hidden
+      && state.draft && !state.draft.assisted
+      && state.draft.wordIds.includes(studying.wordIds[studying.activeIndex])) {
+    state.draft.assisted = true;
+    persist();
+    toast('已看到未完成听写中的答案，那份听写已转为巩固；已填答案仍保留。');
+  }
   document.body.dataset.theme =
     state.settings.theme === "system"
       ? matchMedia("(prefers-color-scheme: dark)").matches
@@ -715,6 +832,7 @@ function render() {
       library,
       section: sectionPage,
       practice: practicePage,
+      study: studyPage,
       result: resultPage,
       review: reviewPage,
       history: historyPage,
@@ -955,7 +1073,7 @@ function openSection(id) {
   currentSection = id;
   navigate("section");
 }
-function startSection(mode) {
+function startSection(mode, study = false) {
   const s = sections.find((s) => s.id === currentSection),
     size = $("#batch-size").value,
     start = size === "all" ? 1 : Number($("#range-start").value),
@@ -975,7 +1093,7 @@ function startSection(mode) {
     toast("请填写有效的词序范围。");
     return;
   }
-  begin(
+  (study ? beginStudy : begin)(
     s.words.slice(start - 1, end),
     `第 ${s.id} 节 · ${start}–${end} 词`,
     s.id,
@@ -1002,10 +1120,8 @@ const actions = {
   "history-link": () => navigate("history"),
   section: (el) => openSection(el.dataset.id),
   daily: () => {
-    if (state.draft) {
-      resume();
-      return;
-    }
+    if (state.draft) { resume(); return; }
+    if (state.studyDraft) { resumeStudy(); return; }
     const today = computeStats(state.history).todayCount,
       count = Math.max(20, Math.min(50, state.settings.dailyGoal - today)),
       seen = new Set(
@@ -1015,7 +1131,7 @@ const actions = {
         sections.find((s) => s.words.some((w) => !seen.has(w.id))) ||
         sections[0],
       words = s.words.filter((w) => !seen.has(w.id));
-    begin(
+    beginStudy(
       (words.length ? words : s.words).slice(0, count),
       `今日练习 · 第 ${s.id} 节`,
       s.id,
@@ -1023,6 +1139,7 @@ const actions = {
   },
   resume,
   "continue-section": el => continueSection(el.dataset.id),
+  "continue-study": el => continueSection(el.dataset.id, true),
   "toggle-uncertain": el => toggleUncertain(Number(el.dataset.index)),
   "clear-uncertain": el => {
     const entry = state.reviews[el.dataset.id];
@@ -1032,8 +1149,32 @@ const actions = {
     render();
     toast("已取消当前模糊标记，历史模糊次数保留。");
   },
-  "retry-uncertain": () => begin(resultWords(lastResult.results.filter(r => r.uncertain)), lastResult.title + " · 模糊词复练", lastResult.sectionId, "review"),
+  "retry-uncertain": () => begin(resultWords(lastResult.results.filter(r => r.uncertain)), lastResult.title + " · 模糊词复练", lastResult.sectionId, "review", false, { assisted: true }),
   "start-section": () => startSection("normal"),
+  "start-study": () => startSection("normal", true),
+  "study-resume": resumeStudy,
+  "study-next": () => moveStudy('next'),
+  "study-prev": () => moveStudy('prev'),
+  "study-restart": () => moveStudy('restart'),
+  "study-replay": () => { stop(); focusStudy(); return playStudy(); },
+  "study-uncertain": () => { stop(); toggleStudyUncertain(); },
+  "study-hide": () => {
+    stop(); const d = state.studyDraft; d.hidden = !d.hidden;
+    if (d.hidden) d.answers[d.activeIndex] = '';
+    persist(); render(); focusStudy();
+  },
+  "study-block": studyBlock,
+  "study-test": studyTest,
+  "study-next-batch": () => {
+    const batch = nextStudyBatch();
+    if (batch) beginStudy(batch.words, batch.title, batch.sectionId, 'normal', true);
+  },
+  "study-uncertain-only": () => {
+    const d = state.studyDraft;
+    beginStudy(wordsForDraft(d).filter((_, i) => d.uncertain[i]), d.title + ' · 模糊词', d.sectionId, 'review', true);
+  },
+  "study-review": () => beginStudy(filteredReviews(), '错词与模糊词学习', reviewChapter || 'review', 'review'),
+  "study-result": () => beginStudy(resultWords(lastResult.results.filter(r => !r.ok || r.uncertain)), lastResult.title + ' · 错词与模糊词', lastResult.sectionId, 'review'),
   "start-shuffle": () => startSection("shuffle"),
   "save-exit": () => navigate("home"),
   replay: () => focusAnswer(activeIndex, { play: true }),
@@ -1058,28 +1199,28 @@ const actions = {
   "align-down": () => align("down"),
   "align-up": () => align("up"),
   "align-undo": () => align("undo"),
-  check,
+  check: () => check(),
   finish: () => finish(),
   retry: () =>
     begin(
       resultWords(lastResult.results),
       lastResult.title,
       lastResult.sectionId,
-      lastResult.mode,
+      lastResult.mode, false, { assisted: true },
     ),
   "retry-shuffle": () =>
     begin(
       resultWords(lastResult.results),
       lastResult.title,
       lastResult.sectionId,
-      "shuffle",
+      "shuffle", false, { assisted: true },
     ),
   "retry-wrong": () =>
     begin(
       resultWords(lastResult.results.filter((r) => !r.ok)),
       lastResult.title + " · 错词复练",
       lastResult.sectionId,
-      "review",
+      "review", false, { assisted: true },
     ),
   "history-detail": (el) => {
     lastResult = state.history.find((h) => h.id === el.dataset.id);
@@ -1211,6 +1352,11 @@ document.addEventListener("click", (e) => {
 });
 document.addEventListener("input", (e) => {
   const el = e.target;
+  if (el.id === "study-copy" && page === 'study') {
+    if (studyPlaying) stop();
+    state.studyDraft.answers[state.studyDraft.activeIndex] = el.value;
+    persist();
+  }
   if (el.dataset.answer !== undefined && session) {
     const i = Number(el.dataset.answer);
     session.answers[i] = el.value;
@@ -1293,6 +1439,20 @@ document.addEventListener("focusin", (e) => {
   }
 });
 document.addEventListener("keydown", e => {
+  if (page === 'study' && state.studyDraft && !state.studyDraft.completed && !$('#dialog').open && !e.isComposing && e.keyCode !== 229) {
+    const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+    const replay = (e.key === 'F2' && plain) || (e.code === 'KeyR' && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey);
+    const mark = e.key === 'F4' && plain;
+    const next = e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey && e.target.id === 'study-copy';
+    if (e.key === 'Escape') { stop(); return; }
+    if (replay || mark || next) {
+      e.preventDefault(); if (e.repeat) return;
+      if (replay) { stop(); void playStudy(); }
+      else if (mark) { stop(); toggleStudyUncertain(); }
+      else moveStudy(e.shiftKey ? 'prev' : 'next');
+    }
+    return;
+  }
   if (!session || $('#dialog').open || e.isComposing || e.keyCode === 229) return;
   const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
   const answer = e.target.dataset.answer !== undefined;
